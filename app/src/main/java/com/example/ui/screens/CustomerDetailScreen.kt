@@ -45,6 +45,10 @@ fun CustomerDetailScreen(
     var showAddTxDialog by remember { mutableStateOf(false) }
     var txTypeToAdd by remember { mutableStateOf("GAVE") } // GAVE or GOT
 
+    // Smart Settle dialog state
+    var txToSettle by remember { mutableStateOf<Transaction?>(null) }
+    var settleAmountText by remember { mutableStateOf("") }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -131,7 +135,7 @@ fun CustomerDetailScreen(
                 .padding(padding)
                 .background(SoftBackground)
         ) {
-            // Net Balance Card
+            // Net Balance Card (Khatabook color convention: Receivable/Lena Hai is JamaGreen, Payable/Dena Hai is UdharRed)
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -146,16 +150,27 @@ fun CustomerDetailScreen(
                 ) {
                     Text("CURRENT NET BALANCE", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "₹${"%.2f".format(Math.abs(balance))}",
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = when {
-                            balance > 0 -> UdharRed
-                            balance < 0 -> JamaGreen
-                            else -> TextPrimary
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (balance != 0.0) {
+                            Icon(
+                                if (balance > 0) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                                contentDescription = null,
+                                tint = if (balance > 0) JamaGreen else UdharRed,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
                         }
-                    )
+                        Text(
+                            text = "₹${"%.2f".format(Math.abs(balance))}",
+                            style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = when {
+                                balance > 0 -> JamaGreen
+                                balance < 0 -> UdharRed
+                                else -> TextPrimary
+                            }
+                        )
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = when {
@@ -164,7 +179,11 @@ fun CustomerDetailScreen(
                             else -> "Account Settled (Hisaab Barabar)"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
+                        color = when {
+                            balance > 0 -> JamaGreen
+                            balance < 0 -> UdharRed
+                            else -> TextSecondary
+                        },
                         fontWeight = FontWeight.SemiBold
                     )
 
@@ -238,7 +257,7 @@ fun CustomerDetailScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Manual Tick Box (as requested)
+                                // Manual Tick Box (Smart Settle notebook method)
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.weight(1f)
@@ -246,10 +265,17 @@ fun CustomerDetailScreen(
                                     Checkbox(
                                         checked = tx.isCancelled,
                                         onCheckedChange = {
-                                            repository.toggleTransactionCancel(tx.id)
+                                            if (tx.isCancelled) {
+                                                // Un-cancel / restore transaction
+                                                repository.toggleTransactionCancel(tx.id)
+                                            } else {
+                                                // Trigger Smart Settle dialog
+                                                txToSettle = tx
+                                                settleAmountText = "%.2f".format(tx.amount)
+                                            }
                                         },
                                         colors = CheckboxDefaults.colors(
-                                            checkedColor = PrimaryBlue,
+                                            checkedColor = JamaGreen,
                                             uncheckedColor = TextSecondary
                                         )
                                     )
@@ -269,12 +295,12 @@ fun CustomerDetailScreen(
                                                 Box(
                                                     modifier = Modifier
                                                         .clip(RoundedCornerShape(4.dp))
-                                                        .background(UdharRed.copy(alpha = 0.15f))
+                                                        .background(JamaGreen.copy(alpha = 0.15f))
                                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                                 ) {
                                                     Text(
-                                                        "CANCELLED OUT",
-                                                        color = UdharRed,
+                                                        "SETTLED",
+                                                        color = JamaGreen,
                                                         fontSize = 9.sp,
                                                         fontWeight = FontWeight.Bold
                                                     )
@@ -364,6 +390,108 @@ fun CustomerDetailScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showAddTxDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Smart Settle Dialog (The Notebook Method)
+    if (txToSettle != null) {
+        val tx = txToSettle!!
+        val isGave = tx.type == "GAVE"
+        val parsedAmt = settleAmountText.toDoubleOrNull() ?: 0.0
+
+        AlertDialog(
+            onDismissRequest = { txToSettle = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = JamaGreen)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Smart Settle Entry", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Customer: ${customer.name}",
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Original Entry: ${if (isGave) "You Gave (Udhar)" else "You Got (Jama)"} of ₹${"%.2f".format(tx.amount)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+
+                    OutlinedTextField(
+                        value = settleAmountText,
+                        onValueChange = { settleAmountText = it },
+                        label = { Text("Settled Amount (₹)") },
+                        placeholder = { Text("e.g. ${tx.amount}") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    // Quick buttons for Full or Half payment
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton(
+                            onClick = { settleAmountText = "%.2f".format(tx.amount) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text("Full: ₹${"%.2f".format(tx.amount)}", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        if (tx.amount > 100) {
+                            FilledTonalButton(
+                                onClick = { settleAmountText = "%.2f".format(tx.amount / 2) },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text("Half: ₹${"%.2f".format(tx.amount / 2)}", fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    // Explanation Box
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(ChipInactiveBg)
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            text = when {
+                                parsedAmt >= tx.amount ->
+                                    "✓ Full Payment: Original line will be crossed out and ₹${"%.2f".format(tx.amount)} recorded in Cashbook as ${if (isGave) "Cash IN" else "Cash OUT"}."
+                                parsedAmt in 0.01..<tx.amount ->
+                                    "✓ Partial Payment: Original line will be crossed out, ₹${"%.2f".format(parsedAmt)} recorded in Cashbook as ${if (isGave) "Cash IN" else "Cash OUT"}, and a new entry of ₹${"%.2f".format(tx.amount - parsedAmt)} will be added for the remaining balance."
+                                else -> "Enter the payment amount to settle."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextPrimary
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (parsedAmt > 0) {
+                            repository.smartSettleTransaction(
+                                transactionId = tx.id,
+                                settledAmount = parsedAmt,
+                                customerName = customer.name
+                            )
+                            txToSettle = null
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = JamaGreen)
+                ) {
+                    Text("Confirm Settle", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { txToSettle = null }) {
                     Text("Cancel")
                 }
             }

@@ -174,7 +174,28 @@ class AppRepository(context: Context) {
             billNumber = billNumber
         )
         _transactions.value = listOf(newTx) + _transactions.value
-        saveData()
+
+        // Automatically synchronize Khata with Cashbook
+        val customer = _customers.value.find { it.id == customerId }
+        val customerName = if (!customer?.name.isNullOrBlank()) customer!!.name else "Customer"
+        if (type == "GOT") {
+            addCashEntry(
+                type = "IN",
+                amount = amount,
+                category = "Khata Settlement",
+                remark = "Received from $customerName"
+            )
+        } else if (type == "GAVE") {
+            addCashEntry(
+                type = "OUT",
+                amount = amount,
+                category = "Khata Credit",
+                remark = "Given to $customerName"
+            )
+        } else {
+            saveData()
+        }
+
         return newTx
     }
 
@@ -188,6 +209,65 @@ class AppRepository(context: Context) {
             }
         }
         saveData()
+    }
+
+    // Smart Settle (The Notebook Method): Handles full or partial settlements and balances Cashbook
+    fun smartSettleTransaction(
+        transactionId: String,
+        settledAmount: Double,
+        customerName: String
+    ): Boolean {
+        val tx = _transactions.value.find { it.id == transactionId } ?: return false
+        val cleanSettled = settledAmount.coerceIn(0.01, tx.amount)
+
+        // 1. Mark original transaction as cancelled (struck through in notebook)
+        _transactions.value = _transactions.value.map {
+            if (it.id == transactionId) it.copy(isCancelled = true) else it
+        }
+
+        // 2. Add balancing entry to Cashbook
+        if (tx.type == "GAVE") {
+            // Settling Udhar: customer gave payment to shop -> Cash IN
+            addCashEntry(
+                type = "IN",
+                amount = cleanSettled,
+                category = "Khata Settlement",
+                remark = if (cleanSettled >= tx.amount - 0.001) {
+                    "Settled Udhar from $customerName"
+                } else {
+                    "Partial payment from $customerName (Orig: ₹${"%.2f".format(tx.amount)})"
+                }
+            )
+        } else if (tx.type == "GOT") {
+            // Settling Jama / advance: shop returns/adjusts -> Cash OUT
+            addCashEntry(
+                type = "OUT",
+                amount = cleanSettled,
+                category = "Khata Settlement",
+                remark = if (cleanSettled >= tx.amount - 0.001) {
+                    "Settled Jama for $customerName"
+                } else {
+                    "Partial settlement for $customerName"
+                }
+            )
+        }
+
+        // 3. Partial Payment: If settledAmount < tx.amount
+        val remaining = tx.amount - cleanSettled
+        if (remaining > 0.009) {
+            val remainingTx = Transaction(
+                customerId = tx.customerId,
+                amount = remaining,
+                type = tx.type,
+                note = "Remaining balance (after ₹${"%.2f".format(cleanSettled)} settled)${if (tx.note.isNotBlank()) " • " + tx.note else ""}",
+                billNumber = tx.billNumber,
+                date = System.currentTimeMillis()
+            )
+            _transactions.value = listOf(remainingTx) + _transactions.value
+        }
+
+        saveData()
+        return true
     }
 
     fun deleteTransaction(transactionId: String) {

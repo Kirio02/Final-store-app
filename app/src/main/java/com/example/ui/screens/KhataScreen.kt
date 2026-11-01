@@ -34,22 +34,25 @@ fun KhataScreen(
 ) {
     val context = LocalContext.current
     val customers by repository.customers.collectAsState()
-    val totalReceivable = repository.getTotalReceivable()
-    val totalPayable = repository.getTotalPayable()
+    val transactions by repository.transactions.collectAsState()
+    val totalReceivable = remember(transactions, customers) { repository.getTotalReceivable() }
+    val totalPayable = remember(transactions, customers) { repository.getTotalPayable() }
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf("ALL") } // ALL, GET, GIVE
     var showAddCustomerDialog by remember { mutableStateOf(false) }
 
-    val filteredCustomers = customers.filter { cust ->
-        val matchesSearch = cust.name.contains(searchQuery, ignoreCase = true) || cust.phone.contains(searchQuery)
-        val balance = repository.getCustomerBalance(cust.id)
-        val matchesFilter = when (selectedFilter) {
-            "GET" -> balance > 0
-            "GIVE" -> balance < 0
-            else -> true
+    val filteredCustomers = remember(customers, transactions, searchQuery, selectedFilter) {
+        customers.filter { cust ->
+            val matchesSearch = cust.name.contains(searchQuery, ignoreCase = true) || cust.phone.contains(searchQuery)
+            val balance = repository.getCustomerBalance(cust.id)
+            val matchesFilter = when (selectedFilter) {
+                "GET" -> balance > 0
+                "GIVE" -> balance < 0
+                else -> true
+            }
+            matchesSearch && matchesFilter
         }
-        matchesSearch && matchesFilter
     }
 
     Scaffold(
@@ -69,7 +72,7 @@ fun KhataScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Receivable / Payable Summary Cards
+            // Receivable / Payable Summary Cards (Khatabook colors: Lena Hai is JamaGreen/Up, Dena Hai is UdharRed/Down)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -84,7 +87,7 @@ fun KhataScreen(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = UdharRed, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.ArrowUpward, contentDescription = null, tint = JamaGreen, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("You'll Get", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontWeight = FontWeight.Bold)
                         }
@@ -93,7 +96,7 @@ fun KhataScreen(
                             text = "₹${"%.2f".format(totalReceivable)}",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
-                            color = UdharRed
+                            color = JamaGreen
                         )
                     }
                 }
@@ -106,7 +109,7 @@ fun KhataScreen(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.ArrowUpward, contentDescription = null, tint = JamaGreen, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = UdharRed, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("You'll Give", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontWeight = FontWeight.Bold)
                         }
@@ -115,7 +118,7 @@ fun KhataScreen(
                             text = "₹${"%.2f".format(totalPayable)}",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
-                            color = JamaGreen
+                            color = UdharRed
                         )
                     }
                 }
@@ -255,8 +258,8 @@ fun KhataScreen(
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = when {
-                                            balance > 0 -> UdharRed
-                                            balance < 0 -> JamaGreen
+                                            balance > 0 -> JamaGreen
+                                            balance < 0 -> UdharRed
                                             else -> TextSecondary
                                         }
                                     )
@@ -267,7 +270,11 @@ fun KhataScreen(
                                             else -> "Settled"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = TextSecondary
+                                        color = when {
+                                            balance > 0 -> JamaGreen
+                                            balance < 0 -> UdharRed
+                                            else -> TextSecondary
+                                        }
                                     )
                                 }
                             }
@@ -297,6 +304,27 @@ fun KhataScreen(
                             if (nameIdx >= 0) {
                                 custName = it.getString(nameIdx) ?: ""
                             }
+                            val idIdx = it.getColumnIndex(ContactsContract.Contacts._ID)
+                            val contactId = if (idIdx >= 0) it.getString(idIdx) else null
+                            if (contactId != null) {
+                                val phoneCursor = context.contentResolver.query(
+                                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                                    null,
+                                    ContactsContract.CommonDataKinds.Phone.CONTACT_ID + " = ?",
+                                    arrayOf(contactId),
+                                    null
+                                )
+                                phoneCursor?.use { pCursor ->
+                                    if (pCursor.moveToFirst()) {
+                                        val phoneIdx = pCursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                                        if (phoneIdx >= 0) {
+                                            val rawNumber = pCursor.getString(phoneIdx) ?: ""
+                                            val cleaned = rawNumber.replace("[^0-9+]".toRegex(), "").trim()
+                                            custPhone = if (cleaned.isNotBlank()) cleaned else rawNumber.trim()
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 } catch (_: Exception) {}
@@ -308,42 +336,20 @@ fun KhataScreen(
             title = { Text("Add New Customer", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // Quick import buttons from Contacts or WhatsApp
-                    Row(
+                    // Quick import button from Phone Contacts (full width)
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                contactPickerLauncher.launch(null)
+                            } catch (_: Exception) {}
+                        },
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                     ) {
-                        OutlinedButton(
-                            onClick = {
-                                try {
-                                    contactPickerLauncher.launch(null)
-                                } catch (_: Exception) {}
-                            },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
-                        ) {
-                            Icon(Icons.Default.Contacts, contentDescription = null, modifier = Modifier.size(16.dp), tint = PrimaryBlue)
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Contacts", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
-
-                        Button(
-                            onClick = {
-                                // Simulate WhatsApp import / quick customer template
-                                custName = "WhatsApp Customer"
-                                custPhone = "+91 98200 55667"
-                                custAddress = "WhatsApp Order"
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = JamaGreen),
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
-                        ) {
-                            Icon(Icons.Default.Chat, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("WhatsApp", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        }
+                        Icon(Icons.Default.Contacts, contentDescription = null, modifier = Modifier.size(18.dp), tint = PrimaryBlue)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Import from Contacts", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = PrimaryBlue)
                     }
 
                     HorizontalDivider(color = CardBorder)

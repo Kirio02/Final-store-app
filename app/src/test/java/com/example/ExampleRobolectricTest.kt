@@ -60,6 +60,28 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun testKhataCashbookSynchronization() {
+        val cust = repository.addCustomer("Sunil Kumar", "+91 91234 56789")
+        // 1. Udhar transaction -> Khata Credit (Cash Out)
+        repository.addTransaction(cust.id, 500.0, "GAVE", "Purchased shirt")
+        assertEquals(1, repository.cashbook.value.size)
+        val entry1 = repository.cashbook.value.first()
+        assertEquals("OUT", entry1.type)
+        assertEquals(500.0, entry1.amount, 0.01)
+        assertEquals("Khata Credit", entry1.category)
+        assertEquals("Given to Sunil Kumar", entry1.remark)
+
+        // 2. Jama transaction -> Khata Settlement (Cash In)
+        repository.addTransaction(cust.id, 300.0, "GOT", "Part settlement")
+        assertEquals(2, repository.cashbook.value.size)
+        val entry2 = repository.cashbook.value.first() // latest entry is first
+        assertEquals("IN", entry2.type)
+        assertEquals(300.0, entry2.amount, 0.01)
+        assertEquals("Khata Settlement", entry2.category)
+        assertEquals("Received from Sunil Kumar", entry2.remark)
+    }
+
+    @Test
     fun testKhatabookImport() {
         val count = repository.importFromKhatabook("+91 98200 12345")
         assertTrue("Must import customers", count > 0)
