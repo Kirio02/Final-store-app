@@ -47,6 +47,12 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE billNumber = :billNumber")
     suspend fun getByBillNumber(billNumber: String): List<TransactionEntity>
 
+    @Query("SELECT * FROM transactions WHERE linkedToTxId = :linkedToTxId")
+    suspend fun getByLinkedToTxId(linkedToTxId: String): List<TransactionEntity>
+
+    @Query("DELETE FROM transactions WHERE linkedToTxId = :linkedToTxId")
+    suspend fun deleteByLinkedToTxId(linkedToTxId: String)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(transaction: TransactionEntity)
 

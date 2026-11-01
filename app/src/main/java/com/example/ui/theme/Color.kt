@@ -21,4 +21,5 @@ val ChipInactiveBg = Color(0xFFEDF2F7)
 val ChipInactiveText = Color(0xFF4A5568)
 
 val GoldAccent = Color(0xFFD4AF37)
+val WarningAmber = Color(0xFFD97706)
 val PremiumBannerBg = Color(0xFF0F172A)

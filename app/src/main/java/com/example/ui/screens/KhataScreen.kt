@@ -1,6 +1,9 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.ContactsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,8 +27,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.AppRepository
+import com.example.model.AppLanguage
 import com.example.model.Customer
+import com.example.model.PartyType
 import com.example.ui.theme.*
+import com.example.ui.util.LanguageStrings
+import com.example.ui.util.PhoneUtil
+import java.net.URLEncoder
 
 @Composable
 fun KhataScreen(
@@ -35,20 +43,26 @@ fun KhataScreen(
     val context = LocalContext.current
     val customers by repository.customers.collectAsState()
     val transactions by repository.transactions.collectAsState()
+    val currentLang by repository.language.collectAsState()
+    val storeProfile by repository.storeProfile.collectAsState()
+    val lang = currentLang
+
     val totalReceivable = remember(transactions, customers) { repository.getTotalReceivable() }
     val totalPayable = remember(transactions, customers) { repository.getTotalPayable() }
 
     var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf("ALL") } // ALL, GET, GIVE
-    var showAddCustomerDialog by remember { mutableStateOf(false) }
+    var selectedFilter by remember { mutableStateOf("ALL") } // ALL, CUSTOMERS, SUPPLIERS, PENDING
+    var showAddPartyDialog by remember { mutableStateOf(false) }
 
     val filteredCustomers = remember(customers, transactions, searchQuery, selectedFilter) {
         customers.filter { cust ->
-            val matchesSearch = cust.name.contains(searchQuery, ignoreCase = true) || cust.phone.contains(searchQuery)
+            val matchesSearch = cust.name.contains(searchQuery, ignoreCase = true) ||
+                    cust.phone.contains(searchQuery)
             val balance = repository.getCustomerBalance(cust.id)
             val matchesFilter = when (selectedFilter) {
-                "GET" -> balance > 0
-                "GIVE" -> balance < 0
+                "CUSTOMERS" -> cust.type == PartyType.CUSTOMER.raw
+                "SUPPLIERS" -> cust.type == PartyType.SUPPLIER.raw
+                "PENDING" -> Math.abs(balance) > 0.001
                 else -> true
             }
             matchesSearch && matchesFilter
@@ -59,11 +73,11 @@ fun KhataScreen(
         containerColor = SoftBackground,
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { showAddCustomerDialog = true },
+                onClick = { showAddPartyDialog = true },
                 containerColor = PrimaryBlue,
                 contentColor = SurfaceWhite,
-                icon = { Icon(Icons.Default.PersonAdd, contentDescription = "Add Customer") },
-                text = { Text("Add Customer", fontWeight = FontWeight.Bold) }
+                icon = { Icon(Icons.Default.PersonAdd, contentDescription = LanguageStrings.get("add_party", lang)) },
+                text = { Text(LanguageStrings.get("add_party", lang), fontWeight = FontWeight.Bold) }
             )
         }
     ) { padding ->
@@ -72,7 +86,7 @@ fun KhataScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Receivable / Payable Summary Cards (Khatabook colors: Lena Hai is JamaGreen/Up, Dena Hai is UdharRed/Down)
+            // Receivable / Payable Summary Cards
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -89,7 +103,12 @@ fun KhataScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.ArrowUpward, contentDescription = null, tint = JamaGreen, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("You'll Get", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = LanguageStrings.get("total_receivable", lang),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
@@ -111,7 +130,12 @@ fun KhataScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = UdharRed, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("You'll Give", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = LanguageStrings.get("total_payable", lang),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
@@ -131,7 +155,7 @@ fun KhataScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
-                placeholder = { Text("Search customer or phone number...", fontSize = 13.sp) },
+                placeholder = { Text(LanguageStrings.get("search_hint", lang), fontSize = 13.sp) },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = TextSecondary) },
                 shape = RoundedCornerShape(24.dp),
                 singleLine = true,
@@ -141,7 +165,7 @@ fun KhataScreen(
                 )
             )
 
-            // Filter Chips
+            // Filter Chips: All / Customers / Suppliers / Pending
             LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -149,9 +173,10 @@ fun KhataScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 val filters = listOf(
-                    "ALL" to "All Customers (${customers.size})",
-                    "GET" to "You'll Get (Lena Hai)",
-                    "GIVE" to "You'll Give (Dena Hai)"
+                    "ALL" to "${LanguageStrings.get("parties", lang)} (${customers.size})",
+                    "CUSTOMERS" to LanguageStrings.get("filter_customers", lang),
+                    "SUPPLIERS" to LanguageStrings.get("filter_suppliers", lang),
+                    "PENDING" to LanguageStrings.get("filter_pending", lang)
                 )
                 items(filters) { (key, label) ->
                     val isSelected = selectedFilter == key
@@ -173,7 +198,7 @@ fun KhataScreen(
                 }
             }
 
-            // Customer List
+            // Party List
             if (filteredCustomers.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -183,14 +208,14 @@ fun KhataScreen(
                         Icon(Icons.Default.PeopleOutline, contentDescription = null, tint = TextTertiary, modifier = Modifier.size(56.dp))
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = if (customers.isEmpty()) "Khata is clean & empty" else "No matching customers",
+                            text = if (customers.isEmpty()) "Khata is clean & empty" else "No matching parties",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = TextSecondary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = if (customers.isEmpty()) "Tap '+ Add Customer' to record your first client" else "Try clearing your search query",
+                            text = if (customers.isEmpty()) "Tap '+ ${LanguageStrings.get("add_party", lang)}' to start recording" else "Try clearing your search or filter",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextTertiary
                         )
@@ -203,6 +228,7 @@ fun KhataScreen(
                 ) {
                     items(filteredCustomers) { cust ->
                         val balance = repository.getCustomerBalance(cust.id)
+                        val isSupplier = cust.type == PartyType.SUPPLIER.raw
 
                         Card(
                             modifier = Modifier
@@ -219,18 +245,21 @@ fun KhataScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
                                     Box(
                                         modifier = Modifier
                                             .size(42.dp)
                                             .clip(CircleShape)
-                                            .background(ChipActiveBg),
+                                            .background(if (isSupplier) ChipInactiveBg else ChipActiveBg),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = cust.name.firstOrNull()?.uppercase() ?: "C",
+                                            text = cust.name.firstOrNull()?.uppercase() ?: "P",
                                             fontWeight = FontWeight.Bold,
-                                            color = PrimaryBlue,
+                                            color = if (isSupplier) TextPrimary else PrimaryBlue,
                                             fontSize = 18.sp
                                         )
                                     }
@@ -238,16 +267,34 @@ fun KhataScreen(
                                     Spacer(modifier = Modifier.width(12.dp))
 
                                     Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = cust.name,
+                                                fontWeight = FontWeight.Bold,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = TextPrimary
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(4.dp),
+                                                color = if (isSupplier) ChipInactiveBg else ChipActiveBg
+                                            ) {
+                                                Text(
+                                                    text = if (isSupplier) LanguageStrings.get("supplier", lang) else LanguageStrings.get("customer", lang),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = if (isSupplier) TextSecondary else PrimaryBlue,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+
+                                        val displayPhone = PhoneUtil.toDisplay(cust.phone)
                                         Text(
-                                            text = cust.name,
-                                            fontWeight = FontWeight.Bold,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            color = TextPrimary
-                                        )
-                                        Text(
-                                            text = if (cust.phone.isNotBlank()) cust.phone else "No phone number",
+                                            text = if (displayPhone.isNotBlank()) displayPhone else LanguageStrings.get("add_phone_number_hint", lang),
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = if (cust.phone.isNotBlank()) TextSecondary else TextTertiary
+                                            color = if (displayPhone.isNotBlank()) TextSecondary else TextTertiary
                                         )
                                     }
                                 }
@@ -258,21 +305,21 @@ fun KhataScreen(
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = when {
-                                            balance > 0 -> JamaGreen
-                                            balance < 0 -> UdharRed
+                                            balance > 0.001 -> JamaGreen
+                                            balance < -0.001 -> UdharRed
                                             else -> TextSecondary
                                         }
                                     )
                                     Text(
                                         text = when {
-                                            balance > 0 -> "Due (Lena Hai)"
-                                            balance < 0 -> "Adv (Dena Hai)"
+                                            balance > 0.001 -> "Lena Hai (Get)"
+                                            balance < -0.001 -> "Dena Hai (Give)"
                                             else -> "Settled"
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = when {
-                                            balance > 0 -> JamaGreen
-                                            balance < 0 -> UdharRed
+                                            balance > 0.001 -> JamaGreen
+                                            balance < -0.001 -> UdharRed
                                             else -> TextSecondary
                                         }
                                     )
@@ -285,64 +332,85 @@ fun KhataScreen(
         }
     }
 
-    // Add Customer Dialog with "Add from Contacts" & "Add from WhatsApp"
-    if (showAddCustomerDialog) {
-        var custName by remember { mutableStateOf("") }
-        var custPhone by remember { mutableStateOf("") }
-        var custAddress by remember { mutableStateOf("") }
+    // Add Party Dialog
+    if (showAddPartyDialog) {
+        var partyType by remember { mutableStateOf(PartyType.CUSTOMER) }
+        var partyName by remember { mutableStateOf("") }
+        var partyPhone by remember { mutableStateOf("") }
+        var partyAddress by remember { mutableStateOf("") }
+        var openingBalance by remember { mutableStateOf("") }
+        var notifyOnWhatsApp by remember { mutableStateOf(true) }
 
-        // Contact Picker Launcher
+        // Contact Picker Launcher via ACTION_PICK on Phone.CONTENT_URI (no READ_CONTACTS needed)
         val contactPickerLauncher = rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.PickContact()
-        ) { uri ->
-            if (uri != null) {
+            contract = ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                val contactUri = result.data?.data ?: return@rememberLauncherForActivityResult
                 try {
-                    val cursor = context.contentResolver.query(uri, null, null, null, null)
-                    cursor?.use {
-                        if (it.moveToFirst()) {
-                            val nameIdx = it.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)
+                    val projection = arrayOf(
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER
+                    )
+                    context.contentResolver.query(contactUri, projection, null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                            val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
                             if (nameIdx >= 0) {
-                                custName = it.getString(nameIdx) ?: ""
+                                val retrievedName = cursor.getString(nameIdx)
+                                if (!retrievedName.isNullOrBlank()) {
+                                    partyName = retrievedName
+                                }
                             }
-                            val idIdx = it.getColumnIndex(ContactsContract.Contacts._ID)
-                            val contactId = if (idIdx >= 0) it.getString(idIdx) else null
-                            if (contactId != null) {
-                                val phoneCursor = context.contentResolver.query(
-                                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                                    null,
-                                    ContactsContract.CommonDataKinds.Phone.CONTACT_ID + " = ?",
-                                    arrayOf(contactId),
-                                    null
-                                )
-                                phoneCursor?.use { pCursor ->
-                                    if (pCursor.moveToFirst()) {
-                                        val phoneIdx = pCursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                                        if (phoneIdx >= 0) {
-                                            val rawNumber = pCursor.getString(phoneIdx) ?: ""
-                                            val cleaned = rawNumber.replace("[^0-9+]".toRegex(), "").trim()
-                                            custPhone = if (cleaned.isNotBlank()) cleaned else rawNumber.trim()
-                                        }
-                                    }
+                            if (numIdx >= 0) {
+                                val retrievedNum = cursor.getString(numIdx)
+                                if (!retrievedNum.isNullOrBlank()) {
+                                    partyPhone = PhoneUtil.normalize(retrievedNum)
                                 }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    android.util.Log.e("KhataScreen", "Error reading contact details: ${e.message}", e)
+                    android.util.Log.e("KhataScreen", "Error picking phone contact: ${e.message}", e)
                 }
             }
         }
 
         AlertDialog(
-            onDismissRequest = { showAddCustomerDialog = false },
-            title = { Text("Add New Customer", fontWeight = FontWeight.Bold) },
+            onDismissRequest = { showAddPartyDialog = false },
+            title = { Text(LanguageStrings.get("add_party", lang), fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // Quick import button from Phone Contacts (full width)
+                    // Party Type Selector (Customer vs Supplier)
+                    Text(
+                        text = LanguageStrings.get("party_type_label", lang),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextSecondary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = partyType == PartyType.CUSTOMER,
+                            onClick = { partyType = PartyType.CUSTOMER },
+                            label = { Text(LanguageStrings.get("customer", lang)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = partyType == PartyType.SUPPLIER,
+                            onClick = { partyType = PartyType.SUPPLIER },
+                            label = { Text(LanguageStrings.get("supplier", lang)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Contact import button
                     OutlinedButton(
                         onClick = {
                             try {
-                                contactPickerLauncher.launch(null)
+                                val pickIntent = Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
+                                contactPickerLauncher.launch(pickIntent)
                             } catch (e: Exception) {
                                 android.util.Log.e("KhataScreen", "Failed to launch contact picker: ${e.message}", e)
                             }
@@ -359,55 +427,139 @@ fun KhataScreen(
                     HorizontalDivider(color = CardBorder)
 
                     OutlinedTextField(
-                        value = custName,
-                        onValueChange = { custName = it },
-                        label = { Text("Customer Name *") },
+                        value = partyName,
+                        onValueChange = { partyName = it },
+                        label = { Text("${LanguageStrings.get("party", lang)} Name *") },
                         placeholder = { Text("e.g. Ramesh Kumar") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
 
                     OutlinedTextField(
-                        value = custPhone,
-                        onValueChange = { custPhone = it },
+                        value = partyPhone,
+                        onValueChange = { partyPhone = it },
                         label = { Text("Phone Number") },
-                        placeholder = { Text("e.g. +91 98765 43210") },
+                        placeholder = { Text("e.g. 98765 43210") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
 
                     OutlinedTextField(
-                        value = custAddress,
-                        onValueChange = { custAddress = it },
+                        value = partyAddress,
+                        onValueChange = { partyAddress = it },
                         label = { Text("Address (Optional)") },
                         placeholder = { Text("Shop or locality") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    OutlinedTextField(
+                        value = openingBalance,
+                        onValueChange = { openingBalance = it },
+                        label = { Text(LanguageStrings.get("opening_balance_label", lang)) },
+                        placeholder = { Text("₹ 0") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    // Notify on WhatsApp switch
+                    val hasPhone = partyPhone.isNotBlank()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = LanguageStrings.get("notify_whatsapp", lang),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (hasPhone) TextPrimary else TextTertiary
+                        )
+                        Switch(
+                            checked = notifyOnWhatsApp && hasPhone,
+                            onCheckedChange = { notifyOnWhatsApp = it },
+                            enabled = hasPhone
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        if (custName.isNotBlank()) {
-                            repository.addCustomer(
-                                name = custName,
-                                phone = custPhone.trim(),
-                                address = custAddress
+                        if (partyName.isNotBlank()) {
+                            val cleanPhone = PhoneUtil.normalize(partyPhone)
+                            val addedCustomer = repository.addCustomer(
+                                name = partyName.trim(),
+                                phone = cleanPhone,
+                                address = partyAddress.trim(),
+                                type = partyType.raw
                             )
-                            showAddCustomerDialog = false
+                            val opBal = openingBalance.trim().toDoubleOrNull() ?: 0.0
+                            if (opBal > 0.001) {
+                                // For Customer: positive balance means you will get -> GAVE
+                                // For Supplier: you owe them -> GOT
+                                val txType = if (partyType == PartyType.CUSTOMER) "GAVE" else "GOT"
+                                repository.addTransaction(
+                                    customerId = addedCustomer.id,
+                                    type = txType,
+                                    amount = opBal,
+                                    note = "Opening Balance",
+                                    paymentMode = "CASH"
+                                )
+                            }
+                            if (notifyOnWhatsApp && cleanPhone.isNotBlank()) {
+                                sendWhatsAppAddNotification(
+                                    context = context,
+                                    phone = cleanPhone,
+                                    partyName = partyName.trim(),
+                                    shopName = storeProfile.storeName.ifBlank { "Ghanshyam Kids Wear" },
+                                    openingBal = opBal,
+                                    lang = lang
+                                )
+                            }
+                            showAddPartyDialog = false
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
                 ) {
-                    Text("Add Customer", fontWeight = FontWeight.Bold)
+                    Text(LanguageStrings.get("btn_save", lang), fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showAddCustomerDialog = false }) {
-                    Text("Cancel")
+                TextButton(onClick = { showAddPartyDialog = false }) {
+                    Text(LanguageStrings.get("btn_cancel", lang))
                 }
             }
         )
+    }
+}
+
+private fun sendWhatsAppAddNotification(
+    context: Context,
+    phone: String,
+    partyName: String,
+    shopName: String,
+    openingBal: Double,
+    lang: AppLanguage
+) {
+    val waNumber = PhoneUtil.toWhatsAppNumber(phone)
+    if (waNumber.isBlank()) return
+    val opBalStr = if (openingBal > 0.001) "%.2f".format(openingBal) else "0.00"
+    val message = LanguageStrings.get("notify_added_message", lang).format(partyName, shopName, opBalStr)
+    try {
+        val encodedMsg = URLEncoder.encode(message, "UTF-8")
+        val waUri = Uri.parse("https://wa.me/$waNumber?text=$encodedMsg")
+        val waIntent = Intent(Intent.ACTION_VIEW, waUri)
+        context.startActivity(waIntent)
+    } catch (e: Exception) {
+        // Fallback to SMS
+        try {
+            val smsUri = Uri.parse("smsto:$waNumber")
+            val smsIntent = Intent(Intent.ACTION_SENDTO, smsUri).apply {
+                putExtra("sms_body", message)
+            }
+            context.startActivity(smsIntent)
+        } catch (se: Exception) {
+            android.util.Log.e("KhataScreen", "Cannot launch WhatsApp or SMS: ${se.message}", se)
+        }
     }
 }

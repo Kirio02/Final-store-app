@@ -107,7 +107,7 @@ class GhanshyamAiEngine(
 
     private fun generateBusinessReport(query: String, lower: String): AiResponse {
         val customers = repository.customers.value
-        val transactions = repository.transactions.value.filter { !it.isCancelled }
+        val transactions = repository.transactions.value
         val invoices = repository.invoices.value
         val cashbook = repository.cashbook.value
         val totalReceivable = repository.getTotalReceivable()
@@ -162,7 +162,11 @@ class GhanshyamAiEngine(
         for (c in customers) {
             if (lower.contains(c.name.lowercase())) {
                 matchedCustomerName = c.name
-                val cTx = transactions.filter { it.customerId == c.id && !it.isCancelled }
+                val cTx = transactions.filter {
+                    it.customerId == c.id &&
+                            it.linkedToTxId == null &&
+                            repository.getBillOutstandingAmount(it) > 0.001
+                }
                 matchedTx = if (targetAmount != null) {
                     cTx.find { Math.abs(it.amount - targetAmount) < 0.01 } ?: cTx.firstOrNull()
                 } else {
@@ -173,7 +177,11 @@ class GhanshyamAiEngine(
         }
 
         if (matchedTx == null && targetAmount != null) {
-            matchedTx = transactions.find { !it.isCancelled && Math.abs(it.amount - targetAmount) < 0.01 }
+            matchedTx = transactions.find {
+                it.linkedToTxId == null &&
+                        repository.getBillOutstandingAmount(it) > 0.001 &&
+                        Math.abs(it.amount - targetAmount) < 0.01
+            }
             if (matchedTx != null) {
                 matchedCustomerName = customers.find { it.id == matchedTx.customerId }?.name ?: "Customer"
             }
@@ -181,19 +189,29 @@ class GhanshyamAiEngine(
 
         if (matchedTx != null) {
             val txId = matchedTx.id
-            val amt = matchedTx.amount
+            val outstanding = repository.getBillOutstandingAmount(matchedTx)
+            val settleAmt = if (targetAmount != null && targetAmount <= outstanding && targetAmount > 0) {
+                targetAmount
+            } else {
+                outstanding
+            }
             val name = matchedCustomerName
             return AiResponse.Success(
-                replyText = "$name ka ₹$amt ka udhar entry cancel out kar diya gaya hai. Ab balance automatically update ho gaya hai.",
-                actionTitle = "Cancel Out: $name - ₹$amt",
+                replyText = "$name ka ₹${"%.2f".format(settleAmt)} payment received mark kar diya gaya hai aur Cashbook me entry jod di gayi hai.",
+                actionTitle = "Mark Received: $name - ₹${"%.2f".format(settleAmt)}",
                 executeAction = {
-                    repository.toggleTransactionCancel(txId)
+                    repository.markBillReceived(
+                        billId = txId,
+                        amount = settleAmt,
+                        paymentMode = "CASH",
+                        addToCashbook = true
+                    )
                 }
             )
         }
 
         return AiResponse.Success(
-            replyText = "Kripya customer ka naam aur amount batayein jise cancel out karna hai, jaise 'Rajesh Sharma ka 1850 udhar cancel karo'."
+            replyText = "Kripya customer ka naam aur amount batayein jise received mark karna hai, jaise 'Rajesh Sharma ka 1850 received karo'."
         )
     }
 

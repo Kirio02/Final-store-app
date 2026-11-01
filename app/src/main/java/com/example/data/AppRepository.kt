@@ -7,6 +7,7 @@ import androidx.core.content.FileProvider
 import androidx.room.withTransaction
 import com.example.data.local.*
 import com.example.model.*
+import com.example.ui.util.PhoneUtil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -215,10 +216,11 @@ class AppRepository(
                     val o = arr.getJSONObject(i)
                     tempCustomers.add(CustomerEntity(
                         id = o.optString("id", UUID.randomUUID().toString()),
-                        name = o.optString("name", "").trim().ifBlank { "Customer" },
-                        phone = o.optString("phone", "").trim(),
+                        name = o.optString("name", "").trim().ifBlank { "Party" },
+                        phone = PhoneUtil.normalize(o.optString("phone", "").trim()),
                         address = o.optString("address", "").trim(),
                         gstin = o.optString("gstin", "").trim(),
+                        type = o.optString("type", "CUSTOMER").uppercase(),
                         createdAt = o.optLong("createdAt", System.currentTimeMillis())
                     ))
                 }
@@ -228,16 +230,41 @@ class AppRepository(
                 val arr = json.getJSONArray("transactions")
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
+                    val txId = o.optString("id", UUID.randomUUID().toString())
+                    val custId = o.optString("customerId", "").trim()
+                    val amt = o.optDouble("amount", 0.0)
+                    val txType = o.optString("type", "GAVE")
+                    val dt = o.optLong("date", System.currentTimeMillis())
+                    val oldIsCancelled = o.optBoolean("isCancelled", false)
+
                     rawTransactions.add(TransactionEntity(
-                        id = o.optString("id", UUID.randomUUID().toString()),
-                        customerId = o.optString("customerId", "").trim(),
-                        amount = o.optDouble("amount", 0.0),
-                        type = o.optString("type", "GAVE"),
+                        id = txId,
+                        customerId = custId,
+                        amount = amt,
+                        type = txType,
                         note = o.optString("note", ""),
-                        date = o.optLong("date", System.currentTimeMillis()),
-                        isCancelled = o.optBoolean("isCancelled", false),
+                        date = dt,
+                        paymentMode = o.optString("paymentMode", "CASH"),
+                        linkedToTxId = if (o.has("linkedToTxId") && !o.isNull("linkedToTxId")) o.getString("linkedToTxId") else null,
+                        isCompleted = o.optBoolean("isCompleted", oldIsCancelled),
                         billNumber = o.optString("billNumber", "")
                     ))
+
+                    // Map old isCancelled = true on credit bills into linked payments
+                    if (oldIsCancelled && txType == "GAVE") {
+                        rawTransactions.add(TransactionEntity(
+                            id = UUID.randomUUID().toString(),
+                            customerId = custId,
+                            amount = amt,
+                            type = "GOT",
+                            note = "Settled (migrated)",
+                            date = dt,
+                            paymentMode = "CASH",
+                            linkedToTxId = txId,
+                            isCompleted = true,
+                            billNumber = ""
+                        ))
+                    }
                 }
             }
 
@@ -557,13 +584,21 @@ class AppRepository(
     // CUSTOMER OPERATIONS
     // ==========================================
 
-    fun addCustomer(name: String, phone: String, address: String = "", gstin: String = ""): Customer {
+    fun addCustomer(
+        name: String,
+        phone: String,
+        address: String = "",
+        gstin: String = "",
+        type: String = "CUSTOMER"
+    ): Customer {
         checkWritesAllowed()
+        val normalizedPhone = PhoneUtil.normalize(phone)
         val newCustomer = CustomerEntity(
             name = name.trim(),
-            phone = phone.trim(),
+            phone = normalizedPhone,
             address = address.trim(),
-            gstin = gstin.trim()
+            gstin = gstin.trim(),
+            type = type.uppercase()
         )
         runBlocking(Dispatchers.IO) {
             database.customerDao().insert(newCustomer)
@@ -572,17 +607,26 @@ class AppRepository(
         return newCustomer.toDomain()
     }
 
-    fun updateCustomer(id: String, name: String, phone: String, address: String = "", gstin: String = "") {
+    fun updateCustomer(
+        id: String,
+        name: String,
+        phone: String,
+        address: String = "",
+        gstin: String = "",
+        type: String = "CUSTOMER"
+    ) {
         checkWritesAllowed()
+        val normalizedPhone = PhoneUtil.normalize(phone)
         runBlocking(Dispatchers.IO) {
             val current = database.customerDao().getById(id)
             if (current != null) {
                 database.customerDao().update(
                     current.copy(
                         name = name.trim(),
-                        phone = phone.trim(),
+                        phone = normalizedPhone,
                         address = address.trim(),
-                        gstin = gstin.trim()
+                        gstin = gstin.trim(),
+                        type = type.uppercase()
                     )
                 )
                 _customers.value = database.customerDao().getAllList().map { it.toDomain() }
@@ -609,7 +653,7 @@ class AppRepository(
     }
 
     fun getCustomerBalance(customerId: String): Double {
-        val txs = transactions.value.filter { it.customerId == customerId && !it.isCancelled }
+        val txs = transactions.value.filter { it.customerId == customerId }
         val gave = txs.filter { it.type == "GAVE" }.sumOf { it.amount }
         val got = txs.filter { it.type == "GOT" }.sumOf { it.amount }
         return gave - got
@@ -623,6 +667,32 @@ class AppRepository(
         return customers.value.sumOf { (-getCustomerBalance(it.id)).coerceAtLeast(0.0) }
     }
 
+    fun getBillReceivedAmount(billId: String): Double {
+        return transactions.value
+            .filter { it.linkedToTxId == billId }
+            .sumOf { it.amount }
+    }
+
+    fun getBillOutstandingAmount(bill: Transaction): Double {
+        val received = getBillReceivedAmount(bill.id)
+        return (bill.amount - received).coerceAtLeast(0.0)
+    }
+
+    enum class BillStatus {
+        PENDING,
+        PARTLY_RECEIVED,
+        RECEIVED
+    }
+
+    fun getBillStatus(bill: Transaction): BillStatus {
+        val received = getBillReceivedAmount(bill.id)
+        return when {
+            received >= bill.amount - 0.001 -> BillStatus.RECEIVED
+            received > 0.001 -> BillStatus.PARTLY_RECEIVED
+            else -> BillStatus.PENDING
+        }
+    }
+
     // ==========================================
     // TRANSACTION OPERATIONS
     // ==========================================
@@ -632,7 +702,11 @@ class AppRepository(
         amount: Double,
         type: String, // "GAVE" or "GOT"
         note: String = "",
-        billNumber: String = ""
+        billNumber: String = "",
+        paymentMode: String = "CASH",
+        linkedToTxId: String? = null,
+        isCompleted: Boolean = false,
+        date: Long = System.currentTimeMillis()
     ): Transaction {
         checkWritesAllowed()
         val newTx = TransactionEntity(
@@ -640,6 +714,10 @@ class AppRepository(
             amount = amount,
             type = type,
             note = note,
+            date = date,
+            paymentMode = paymentMode,
+            linkedToTxId = linkedToTxId,
+            isCompleted = isCompleted,
             billNumber = billNumber
         )
         runBlocking(Dispatchers.IO) {
@@ -649,14 +727,196 @@ class AppRepository(
         return newTx.toDomain()
     }
 
-    fun toggleTransactionCancel(transactionId: String) {
+    fun markBillReceived(
+        billId: String,
+        amount: Double,
+        paymentMode: String = "CASH",
+        date: Long = System.currentTimeMillis(),
+        addToCashbook: Boolean = true
+    ): Transaction? {
+        checkWritesAllowed()
+        return runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                val bill = database.transactionDao().getById(billId) ?: return@withTransaction null
+                val customer = database.customerDao().getById(bill.customerId)
+                val cleanAmount = amount.coerceAtLeast(0.01)
+
+                // For CUSTOMER credit bill (GAVE), payment received is GOT
+                // For SUPPLIER credit bill (GOT), payment to supplier is GAVE
+                val paymentType = if (customer?.type == "SUPPLIER") "GAVE" else "GOT"
+                val paymentTxId = UUID.randomUUID().toString()
+
+                val paymentTx = TransactionEntity(
+                    id = paymentTxId,
+                    customerId = bill.customerId,
+                    amount = cleanAmount,
+                    type = paymentType,
+                    note = if (bill.billNumber.isNotBlank()) "Received for Bill ${bill.billNumber}" else "Received for bill",
+                    date = date,
+                    paymentMode = paymentMode,
+                    linkedToTxId = billId,
+                    isCompleted = true,
+                    billNumber = ""
+                )
+                database.transactionDao().insert(paymentTx)
+
+                // Check if bill is now fully settled
+                val alreadyReceived = database.transactionDao().getByLinkedToTxId(billId).sumOf { it.amount }
+                if (alreadyReceived >= bill.amount - 0.001) {
+                    database.transactionDao().update(bill.copy(isCompleted = true))
+                }
+
+                // Add to Cashbook if requested
+                if (addToCashbook) {
+                    val cashType = if (paymentType == "GOT") "IN" else "OUT"
+                    val partyLabel = customer?.name ?: "Party"
+                    val remark = if (cashType == "IN") "Received from $partyLabel" else "Paid to $partyLabel"
+                    database.cashbookDao().insert(
+                        CashEntryEntity(
+                            type = cashType,
+                            amount = cleanAmount,
+                            category = "Khata Settlement",
+                            remark = remark,
+                            date = date,
+                            paymentMode = paymentMode,
+                            linkedId = paymentTxId,
+                            source = "khata"
+                        )
+                    )
+                }
+
+                paymentTx.toDomain()
+            }.also {
+                _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+                _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+            }
+        }
+    }
+
+    fun markBillsAllReceived(
+        billIds: List<String>,
+        paymentMode: String = "CASH",
+        addToCashbook: Boolean = true
+    ) {
         checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
-            val current = database.transactionDao().getById(transactionId)
-            if (current != null) {
-                database.transactionDao().update(current.copy(isCancelled = !current.isCancelled))
-                _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            database.withTransaction {
+                for (billId in billIds) {
+                    val bill = database.transactionDao().getById(billId) ?: continue
+                    val received = database.transactionDao().getByLinkedToTxId(billId).sumOf { it.amount }
+                    val outstanding = bill.amount - received
+                    if (outstanding > 0.01) {
+                        val customer = database.customerDao().getById(bill.customerId)
+                        val paymentType = if (customer?.type == "SUPPLIER") "GAVE" else "GOT"
+                        val paymentTxId = UUID.randomUUID().toString()
+
+                        val paymentTx = TransactionEntity(
+                            id = paymentTxId,
+                            customerId = bill.customerId,
+                            amount = outstanding,
+                            type = paymentType,
+                            note = if (bill.billNumber.isNotBlank()) "Received for Bill ${bill.billNumber}" else "Received for bill",
+                            date = System.currentTimeMillis(),
+                            paymentMode = paymentMode,
+                            linkedToTxId = billId,
+                            isCompleted = true,
+                            billNumber = ""
+                        )
+                        database.transactionDao().insert(paymentTx)
+                        database.transactionDao().update(bill.copy(isCompleted = true))
+
+                        if (addToCashbook) {
+                            val cashType = if (paymentType == "GOT") "IN" else "OUT"
+                            val partyLabel = customer?.name ?: "Party"
+                            val remark = if (cashType == "IN") "Received from $partyLabel" else "Paid to $partyLabel"
+                            database.cashbookDao().insert(
+                                CashEntryEntity(
+                                    type = cashType,
+                                    amount = outstanding,
+                                    category = "Khata Settlement",
+                                    remark = remark,
+                                    date = System.currentTimeMillis(),
+                                    paymentMode = paymentMode,
+                                    linkedId = paymentTxId,
+                                    source = "khata"
+                                )
+                            )
+                        }
+                    }
+                }
             }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+        }
+    }
+
+    fun undoPayment(paymentTxId: String) {
+        checkWritesAllowed()
+        runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                val payment = database.transactionDao().getById(paymentTxId) ?: return@withTransaction
+                val billId = payment.linkedToTxId
+
+                database.cashbookDao().deleteByLinkedId(paymentTxId)
+                database.transactionDao().deleteById(paymentTxId)
+
+                if (!billId.isNullOrBlank()) {
+                    val bill = database.transactionDao().getById(billId)
+                    if (bill != null) {
+                        val remainingReceived = database.transactionDao().getByLinkedToTxId(billId).sumOf { it.amount }
+                        if (remainingReceived < bill.amount - 0.001) {
+                            database.transactionDao().update(bill.copy(isCompleted = false))
+                        }
+                    }
+                }
+            }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+        }
+    }
+
+    fun toggleBillCompleted(billId: String) {
+        checkWritesAllowed()
+        runBlocking(Dispatchers.IO) {
+            val bill = database.transactionDao().getById(billId) ?: return@runBlocking
+            database.transactionDao().update(bill.copy(isCompleted = !bill.isCompleted))
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+        }
+    }
+
+    fun editTransaction(
+        txId: String,
+        amount: Double,
+        note: String,
+        date: Long,
+        paymentMode: String
+    ) {
+        checkWritesAllowed()
+        runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                val current = database.transactionDao().getById(txId) ?: return@withTransaction
+                val updated = current.copy(
+                    amount = amount.coerceAtLeast(0.01),
+                    note = note.trim(),
+                    date = date,
+                    paymentMode = paymentMode
+                )
+                database.transactionDao().update(updated)
+
+                val linkedCash = database.cashbookDao().getAllList().find { it.linkedId == txId }
+                if (linkedCash != null) {
+                    database.cashbookDao().insert(
+                        linkedCash.copy(
+                            amount = updated.amount,
+                            remark = if (updated.note.isNotBlank()) updated.note else linkedCash.remark,
+                            date = updated.date,
+                            paymentMode = updated.paymentMode
+                        )
+                    )
+                }
+            }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
         }
     }
 
@@ -669,80 +929,6 @@ class AppRepository(
             }
             _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
             _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
-        }
-    }
-
-    fun smartSettleTransaction(
-        transactionId: String,
-        settledAmount: Double,
-        customerName: String,
-        paymentMode: String = "CASH",
-        addToCashbook: Boolean = true
-    ): Boolean {
-        checkWritesAllowed()
-        return runBlocking(Dispatchers.IO) {
-            val success = database.withTransaction {
-                val tx = database.transactionDao().getById(transactionId) ?: return@withTransaction false
-                val cleanSettled = settledAmount.coerceIn(0.01, tx.amount)
-
-                // 1. Mark original transaction as cancelled
-                database.transactionDao().update(tx.copy(isCancelled = true))
-
-                // 2. Add balancing entry to Cashbook if enabled
-                if (addToCashbook) {
-                    if (tx.type == "GAVE") {
-                        database.cashbookDao().insert(
-                            CashEntryEntity(
-                                type = "IN",
-                                amount = cleanSettled,
-                                category = "Khata Settlement",
-                                remark = if (cleanSettled >= tx.amount - 0.001) {
-                                    "Settled Udhar from $customerName"
-                                } else {
-                                    "Partial payment from $customerName (Orig: ₹${"%.2f".format(tx.amount)})"
-                                },
-                                paymentMode = paymentMode,
-                                linkedId = tx.id,
-                                source = "settlement"
-                            )
-                        )
-                    } else if (tx.type == "GOT") {
-                        database.cashbookDao().insert(
-                            CashEntryEntity(
-                                type = "OUT",
-                                amount = cleanSettled,
-                                category = "Khata Settlement",
-                                remark = if (cleanSettled >= tx.amount - 0.001) {
-                                    "Settled Jama for $customerName"
-                                } else {
-                                    "Partial settlement for $customerName"
-                                },
-                                paymentMode = paymentMode,
-                                linkedId = tx.id,
-                                source = "settlement"
-                            )
-                        )
-                    }
-                }
-
-                // 3. If partial settlement, add remainder line item
-                val remainder = tx.amount - cleanSettled
-                if (remainder >= 0.01) {
-                    database.transactionDao().insert(
-                        TransactionEntity(
-                            customerId = tx.customerId,
-                            amount = remainder,
-                            type = tx.type,
-                            note = "Remaining balance after ₹${"%.2f".format(cleanSettled)} settlement (${tx.note.ifBlank { "Original entry" }})"
-                        )
-                    )
-                }
-
-                true
-            }
-            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
-            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
-            success
         }
     }
 
@@ -994,7 +1180,8 @@ class AppRepository(
                 for (item in nonDuplicates) {
                     val newCust = CustomerEntity(
                         name = item.name.trim(),
-                        phone = item.phone.trim()
+                        phone = PhoneUtil.normalize(item.phone),
+                        type = item.type.uppercase()
                     )
                     database.customerDao().insert(newCust)
                     if (Math.abs(item.balance) > 0.009) {
@@ -1057,6 +1244,7 @@ class AppRepository(
                 o.put("phone", c.phone)
                 o.put("address", c.address)
                 o.put("gstin", c.gstin)
+                o.put("type", c.type)
                 o.put("createdAt", c.createdAt)
                 custArr.put(o)
             }
@@ -1071,7 +1259,9 @@ class AppRepository(
                 o.put("type", t.type)
                 o.put("note", t.note)
                 o.put("date", t.date)
-                o.put("isCancelled", t.isCancelled)
+                o.put("paymentMode", t.paymentMode)
+                o.put("linkedToTxId", t.linkedToTxId)
+                o.put("isCompleted", t.isCompleted)
                 o.put("billNumber", t.billNumber)
                 txArr.put(o)
             }
@@ -1254,10 +1444,11 @@ class AppRepository(
                     val o = arr.getJSONObject(i)
                     newCustomers.add(CustomerEntity(
                         id = o.optString("id", UUID.randomUUID().toString()),
-                        name = o.optString("name", ""),
-                        phone = o.optString("phone", ""),
-                        address = o.optString("address", ""),
-                        gstin = o.optString("gstin", ""),
+                        name = o.optString("name", "").trim().ifBlank { "Party" },
+                        phone = PhoneUtil.normalize(o.optString("phone", "").trim()),
+                        address = o.optString("address", "").trim(),
+                        gstin = o.optString("gstin", "").trim(),
+                        type = o.optString("type", "CUSTOMER").uppercase(),
                         createdAt = o.optLong("createdAt", System.currentTimeMillis())
                     ))
                 }
@@ -1267,16 +1458,41 @@ class AppRepository(
                 val arr = json.getJSONArray("transactions")
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
+                    val txId = o.optString("id", UUID.randomUUID().toString())
+                    val custId = o.optString("customerId", "").trim()
+                    val amt = o.optDouble("amount", 0.0)
+                    val txType = o.optString("type", "GAVE")
+                    val dt = o.optLong("date", System.currentTimeMillis())
+                    val oldIsCancelled = o.optBoolean("isCancelled", false)
+
                     rawTransactions.add(TransactionEntity(
-                        id = o.optString("id", UUID.randomUUID().toString()),
-                        customerId = o.optString("customerId", ""),
-                        amount = o.optDouble("amount", 0.0),
-                        type = o.optString("type", "GAVE"),
+                        id = txId,
+                        customerId = custId,
+                        amount = amt,
+                        type = txType,
                         note = o.optString("note", ""),
-                        date = o.optLong("date", System.currentTimeMillis()),
-                        isCancelled = o.optBoolean("isCancelled", false),
+                        date = dt,
+                        paymentMode = o.optString("paymentMode", "CASH"),
+                        linkedToTxId = if (o.has("linkedToTxId") && !o.isNull("linkedToTxId")) o.getString("linkedToTxId") else null,
+                        isCompleted = o.optBoolean("isCompleted", oldIsCancelled),
                         billNumber = o.optString("billNumber", "")
                     ))
+
+                    // Map old isCancelled = true on credit bills into linked payments
+                    if (oldIsCancelled && txType == "GAVE") {
+                        rawTransactions.add(TransactionEntity(
+                            id = UUID.randomUUID().toString(),
+                            customerId = custId,
+                            amount = amt,
+                            type = "GOT",
+                            note = "Settled (migrated)",
+                            date = dt,
+                            paymentMode = "CASH",
+                            linkedToTxId = txId,
+                            isCompleted = true,
+                            billNumber = ""
+                        ))
+                    }
                 }
             }
 
@@ -1468,7 +1684,7 @@ class AppRepository(
         sb.append("Customer Name,Phone,Net Balance,Last Transaction Date\n")
 
         customers.value.forEach { customer ->
-            val custTxns = transactions.value.filter { it.customerId == customer.id && !it.isCancelled }
+            val custTxns = transactions.value.filter { it.customerId == customer.id }
             val totalGave = custTxns.filter { it.type == "GAVE" }.sumOf { it.amount }
             val totalGot = custTxns.filter { it.type == "GOT" }.sumOf { it.amount }
             val netBalance = totalGave - totalGot

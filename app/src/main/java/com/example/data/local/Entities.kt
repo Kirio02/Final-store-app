@@ -17,6 +17,7 @@ data class CustomerEntity(
     val phone: String,
     val address: String = "",
     val gstin: String = "",
+    val type: String = "CUSTOMER", // "CUSTOMER" or "SUPPLIER"
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -26,6 +27,7 @@ fun CustomerEntity.toDomain() = Customer(
     phone = phone,
     address = address,
     gstin = gstin,
+    type = type,
     createdAt = createdAt
 )
 
@@ -35,6 +37,7 @@ fun Customer.toEntity() = CustomerEntity(
     phone = phone,
     address = address,
     gstin = gstin,
+    type = type,
     createdAt = createdAt
 )
 
@@ -42,7 +45,8 @@ fun Customer.toEntity() = CustomerEntity(
     tableName = "transactions",
     indices = [
         Index(value = ["customerId"]),
-        Index(value = ["date"])
+        Index(value = ["date"]),
+        Index(value = ["linkedToTxId"])
     ],
     foreignKeys = [
         ForeignKey(
@@ -61,7 +65,9 @@ data class TransactionEntity(
     val type: String, // "GAVE", "GOT"
     val note: String = "",
     val date: Long = System.currentTimeMillis(),
-    val isCancelled: Boolean = false,
+    val paymentMode: String = "CASH",
+    val linkedToTxId: String? = null,
+    val isCompleted: Boolean = false,
     val billNumber: String = ""
 )
 
@@ -72,7 +78,9 @@ fun TransactionEntity.toDomain() = Transaction(
     type = type,
     note = note,
     date = date,
-    isCancelled = isCancelled,
+    paymentMode = paymentMode,
+    linkedToTxId = linkedToTxId,
+    isCompleted = isCompleted,
     billNumber = billNumber
 )
 
@@ -83,7 +91,9 @@ fun Transaction.toEntity() = TransactionEntity(
     type = type,
     note = note,
     date = date,
-    isCancelled = isCancelled,
+    paymentMode = paymentMode,
+    linkedToTxId = linkedToTxId,
+    isCompleted = isCompleted,
     billNumber = billNumber
 )
 

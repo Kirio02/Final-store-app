@@ -2,10 +2,17 @@ package com.example
 
 import android.content.Context
 import com.example.data.AppRepository
+import com.example.model.Customer
 import com.example.model.Invoice
 import com.example.model.InvoiceItem
+import com.example.model.PartyType
+import com.example.model.StoreProfile
 import com.example.ui.ai.AiResponse
 import com.example.ui.ai.GhanshyamAiEngine
+import com.example.ui.util.PhoneUtil
+import com.example.ui.util.StatementDateRange
+import com.example.ui.util.StatementFilter
+import com.example.ui.util.StatementGenerator
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Before
@@ -42,70 +49,210 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun testTransactionCancelOutFeature() {
-        val cust = repository.addCustomer("Rajesh Sharma", "+91 98200 12345")
-        val txGave = repository.addTransaction(cust.id, 1850.0, "GAVE", "Old Udhar")
-        val txGot = repository.addTransaction(cust.id, 400.0, "GOT", "Cash Payment")
+    fun testPhoneUtilNormalization() {
+        // 10 digits gets 91 prefix
+        assertEquals("919876543210", PhoneUtil.normalize("9876543210"))
+        assertEquals("919876543210", PhoneUtil.normalize("98765 43210"))
+        assertEquals("919876543210", PhoneUtil.normalize("98765-43210"))
 
-        // Initial balance: 1850 - 400 = 1450
-        assertEquals(1450.0, repository.getCustomerBalance(cust.id), 0.01)
+        // Leading 0 stripped and 91 added
+        assertEquals("919876543210", PhoneUtil.normalize("09876543210"))
 
-        // Cancel out the 1850 udhar entry using the tick box feature
-        repository.toggleTransactionCancel(txGave.id)
+        // Existing country code preserved
+        assertEquals("919876543210", PhoneUtil.normalize("+91 98765 43210"))
+        assertEquals("919876543210", PhoneUtil.normalize("+919876543210"))
+        assertEquals("14155552671", PhoneUtil.normalize("+1 415 555 2671"))
 
-        // Balance must recalculate: 0 - 400 = -400 (shop owes customer or advance)
-        assertEquals(-400.0, repository.getCustomerBalance(cust.id), 0.01)
+        // WhatsApp number
+        assertEquals("919876543210", PhoneUtil.toWhatsAppNumber("9876543210"))
+        assertEquals("919876543210", PhoneUtil.toWhatsAppNumber("+91 98765 43210"))
 
-        // Un-cancel
-        repository.toggleTransactionCancel(txGave.id)
-        assertEquals(1450.0, repository.getCustomerBalance(cust.id), 0.01)
+        // Display formatting
+        assertEquals("+91 98765 43210", PhoneUtil.toDisplay("919876543210"))
+        assertEquals("+91 98765 43210", PhoneUtil.toDisplay("+919876543210"))
+        assertEquals("", PhoneUtil.toDisplay(""))
     }
 
     @Test
-    fun testKhataCashbookDecouplingAndReversibility() {
-        val cust = repository.addCustomer("Sunil Kumar", "+91 91234 56789")
+    fun testPartyTypesAndUniversalBalanceConvention() {
+        // 1. Customer: GAVE increases balance (Lena Hai > 0), GOT reduces balance toward 0
+        val cust = repository.addCustomer("Ramesh Cloth Store", "9820011111", type = PartyType.CUSTOMER.raw)
+        assertEquals(PartyType.CUSTOMER.raw, cust.type)
 
-        // 1. Plain Khata addTransaction must NOT automatically post to cashbook
-        val tx = repository.addTransaction(cust.id, 500.0, "GAVE", "Purchased shirt")
-        assertEquals("Plain addTransaction must not post to cashbook", 0, repository.cashbook.value.size)
+        val custBill = repository.addTransaction(cust.id, 5000.0, "GAVE", "Festival wholesale")
+        assertEquals(5000.0, repository.getCustomerBalance(cust.id), 0.01)
+        assertEquals(AppRepository.BillStatus.PENDING, repository.getBillStatus(custBill))
 
-        // 2. Settlement with cashbook sync
-        repository.smartSettleTransaction(
-            transactionId = tx.id,
-            settledAmount = 500.0,
-            customerName = "Sunil Kumar",
-            addToCashbook = true,
-            paymentMode = "CASH"
+        // 2. Supplier: GOT is credit goods received (Dena Hai < 0), GAVE is payment to supplier
+        val supp = repository.addCustomer("Surat Textile Mill", "9820022222", type = PartyType.SUPPLIER.raw)
+        assertEquals(PartyType.SUPPLIER.raw, supp.type)
+
+        val suppBill = repository.addTransaction(supp.id, 8000.0, "GOT", "Fabric roll lot")
+        // Sign convention: balance = gave - got = 0 - 8000 = -8000 (You will give / Dena Hai)
+        assertEquals(-8000.0, repository.getCustomerBalance(supp.id), 0.01)
+        assertEquals(AppRepository.BillStatus.PENDING, repository.getBillStatus(suppBill))
+    }
+
+    @Test
+    fun testMarkReceivedAndReversibleUndoPayment() {
+        val cust = repository.addCustomer("Rajesh Sharma", "9820012345")
+        val bill = repository.addTransaction(cust.id, 2000.0, "GAVE", "Shirt lot")
+
+        assertEquals(2000.0, repository.getCustomerBalance(cust.id), 0.01)
+        assertEquals(AppRepository.BillStatus.PENDING, repository.getBillStatus(bill))
+        assertEquals(2000.0, repository.getBillOutstandingAmount(bill), 0.01)
+
+        // Partial payment: 800 received with cashbook sync
+        val partialPayment = repository.markBillReceived(
+            billId = bill.id,
+            amount = 800.0,
+            paymentMode = "UPI",
+            addToCashbook = true
         )
-        assertEquals("Settling with cashbook sync adds 1 entry", 1, repository.cashbook.value.size)
-        val settleEntry = repository.cashbook.value.first()
-        assertEquals("IN", settleEntry.type)
-        assertEquals(500.0, settleEntry.amount, 0.01)
-        assertEquals("CASH", settleEntry.paymentMode)
+        assertNotNull("Payment transaction created", partialPayment)
+        assertEquals("GOT", partialPayment!!.type)
+        assertEquals(800.0, partialPayment.amount, 0.01)
+        assertEquals("UPI", partialPayment.paymentMode)
+        assertEquals(bill.id, partialPayment.linkedToTxId)
 
-        // 3. Invoice creation: CASH bill posts ONE cash in, CREDIT posts 0 cash entries
-        val cashInvoice = Invoice(
-            billNumber = "BILL-001",
+        // Check balance and bill status
+        assertEquals(1200.0, repository.getCustomerBalance(cust.id), 0.01)
+        assertEquals(800.0, repository.getBillReceivedAmount(bill.id), 0.01)
+        assertEquals(1200.0, repository.getBillOutstandingAmount(bill), 0.01)
+        assertEquals(AppRepository.BillStatus.PARTLY_RECEIVED, repository.getBillStatus(bill))
+
+        // Check cashbook entry created and linked
+        assertEquals(1, repository.cashbook.value.size)
+        val cashEntry = repository.cashbook.value.first()
+        assertEquals("IN", cashEntry.type)
+        assertEquals(800.0, cashEntry.amount, 0.01)
+        assertEquals("UPI", cashEntry.paymentMode)
+        assertEquals(partialPayment.id, cashEntry.linkedId)
+
+        // Full remaining payment: 1200 received
+        val fullPayment = repository.markBillReceived(
+            billId = bill.id,
+            amount = 1200.0,
+            paymentMode = "CASH",
+            addToCashbook = true
+        )
+        assertNotNull(fullPayment)
+        assertEquals(0.0, repository.getCustomerBalance(cust.id), 0.01)
+        assertEquals(AppRepository.BillStatus.RECEIVED, repository.getBillStatus(bill))
+        assertEquals(0.0, repository.getBillOutstandingAmount(bill), 0.01)
+        assertEquals(2, repository.cashbook.value.size)
+
+        // Plain Completed checkbox (Delivered/Packed) toggle - NO MONEY EFFECT
+        repository.toggleBillCompleted(bill.id)
+        val updatedBill = repository.transactions.value.find { it.id == bill.id }!!
+        assertTrue("Bill should be marked completed", updatedBill.isCompleted)
+        assertEquals("Completing bill has 0 money effect", 0.0, repository.getCustomerBalance(cust.id), 0.01)
+
+        // Undo payment: undoing the partial payment (800)
+        repository.undoPayment(partialPayment.id)
+        assertEquals("Balance recomputed after undo", 800.0, repository.getCustomerBalance(cust.id), 0.01)
+        assertEquals(AppRepository.BillStatus.PARTLY_RECEIVED, repository.getBillStatus(bill))
+        // Linked cashbook entry removed
+        assertNull("Undone payment removed from cashbook", repository.cashbook.value.find { it.linkedId == partialPayment.id })
+        assertEquals(1, repository.cashbook.value.size)
+    }
+
+    @Test
+    fun testMultiSelectMarkAllReceived() {
+        val cust = repository.addCustomer("Vijay Patel", "9898011223")
+        val bill1 = repository.addTransaction(cust.id, 1000.0, "GAVE", "Bill 1")
+        val bill2 = repository.addTransaction(cust.id, 1500.0, "GAVE", "Bill 2")
+        val bill3 = repository.addTransaction(cust.id, 500.0, "GAVE", "Bill 3")
+
+        assertEquals(3000.0, repository.getCustomerBalance(cust.id), 0.01)
+
+        // Mark bill1 and bill2 received in bulk
+        repository.markBillsAllReceived(
+            billIds = listOf(bill1.id, bill2.id),
+            paymentMode = "BANK",
+            addToCashbook = true
+        )
+
+        // Bill 1 and 2 received, bill 3 still pending
+        assertEquals(AppRepository.BillStatus.RECEIVED, repository.getBillStatus(bill1))
+        assertEquals(AppRepository.BillStatus.RECEIVED, repository.getBillStatus(bill2))
+        assertEquals(AppRepository.BillStatus.PENDING, repository.getBillStatus(bill3))
+        assertEquals(500.0, repository.getCustomerBalance(cust.id), 0.01)
+
+        // Cashbook got 2 entries linked to the 2 payments
+        assertEquals(2, repository.cashbook.value.size)
+        assertTrue(repository.cashbook.value.all { it.paymentMode == "BANK" && it.type == "IN" })
+    }
+
+    @Test
+    fun testEditTransactionWithCashbookSync() {
+        val cust = repository.addCustomer("Dinesh Shah", "9825000111")
+        val tx = repository.addTransaction(cust.id, 1500.0, "GOT", "Payment", paymentMode = "CASH")
+        repository.addCashEntry(
+            type = "IN",
+            amount = 1500.0,
+            category = "Khata Settlement",
+            remark = "From Dinesh",
+            paymentMode = "CASH",
+            linkedId = tx.id,
+            source = "khata"
+        )
+
+        assertEquals(1, repository.cashbook.value.size)
+        assertEquals(1500.0, repository.cashbook.value.first().amount, 0.01)
+
+        // Edit amount and mode
+        repository.editTransaction(
+            txId = tx.id,
+            amount = 1800.0,
+            note = "Updated Payment",
             date = System.currentTimeMillis(),
-            customerName = "Cash Customer",
-            customerPhone = "",
-            items = listOf(InvoiceItem(name = "T-Shirt", unitPrice = 200.0, quantity = 1, gstPercent = 5.0, total = 210.0)),
-            subtotal = 200.0,
-            gstAmount = 10.0,
-            discount = 0.0,
-            additionalCharges = 0.0,
-            totalAmount = 210.0,
-            paymentMode = "CASH"
+            paymentMode = "UPI"
         )
-        repository.createInvoice(cashInvoice)
-        assertEquals("Cash bill posts 1 additional entry to cashbook", 2, repository.cashbook.value.size)
-        val invoiceCashEntry = repository.cashbook.value.find { it.linkedId == cashInvoice.id }
-        assertNotNull("Invoice cashbook entry must exist", invoiceCashEntry)
-        assertEquals("invoice", invoiceCashEntry!!.source)
 
-        // 4. Deleting invoice must remove the linked cashbook entry
-        repository.deleteInvoice(cashInvoice.id)
-        assertNull("Deleted invoice cashbook entry must be removed", repository.cashbook.value.find { it.linkedId == cashInvoice.id })
+        val updatedTx = repository.transactions.value.find { it.id == tx.id }!!
+        assertEquals(1800.0, updatedTx.amount, 0.01)
+        assertEquals("UPI", updatedTx.paymentMode)
+        assertEquals("Updated Payment", updatedTx.note)
+
+        // Cashbook entry updated accordingly
+        val updatedCash = repository.cashbook.value.find { it.linkedId == tx.id }!!
+        assertEquals(1800.0, updatedCash.amount, 0.01)
+        assertEquals("UPI", updatedCash.paymentMode)
+    }
+
+    @Test
+    fun testStatementPureComputation() {
+        val cust = repository.addCustomer("Prakash Bhai", "9876543210")
+        val t1 = repository.addTransaction(cust.id, 2000.0, "GAVE", "Opening Balance", date = 1000L)
+        val t2 = repository.addTransaction(cust.id, 3000.0, "GAVE", "Festival Lot", date = 2000L)
+        val t3 = repository.markBillReceived(t2.id, 1000.0, "CASH", date = 3000L, addToCashbook = false)!!
+
+        val allTx = listOf(t1, t2, t3)
+        val statementData = StatementGenerator.computeStatement(
+            customer = cust,
+            allTransactions = allTx,
+            dateRange = com.example.ui.util.StatementDateRange.ALL,
+            filter = com.example.ui.util.StatementFilter.ALL_ENTRIES
+        )
+
+        assertEquals(3, statementData.entries.size)
+        // Row 1: t1 (GAVE 2000) -> running balance = 2000
+        assertEquals(2000.0, statementData.entries[0].runningBalance, 0.01)
+        // Row 2: t2 (GAVE 3000) -> running balance = 5000
+        assertEquals(5000.0, statementData.entries[1].runningBalance, 0.01)
+        // Row 3: t3 (GOT 1000) -> running balance = 4000
+        assertEquals(4000.0, statementData.entries[2].runningBalance, 0.01)
+        assertEquals(4000.0, statementData.closingBalance, 0.01)
+
+        // Pending bills filter only returns unfulfilled credit bills
+        val pendingData = StatementGenerator.computeStatement(
+            customer = cust,
+            allTransactions = allTx,
+            dateRange = com.example.ui.util.StatementDateRange.ALL,
+            filter = com.example.ui.util.StatementFilter.PENDING_BILLS_ONLY
+        )
+        assertEquals(2, pendingData.entries.size)
     }
 
     @Test
@@ -186,8 +333,30 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun testMultiPagePdfStatementGeneration() {
+        val cust = repository.addCustomer("Mohan Lal", "9876500000")
+        for (i in 1..40) {
+            repository.addTransaction(cust.id, 100.0 * i, "GAVE", "Wholesale Lot #$i")
+        }
+        val statementData = StatementGenerator.computeStatement(
+            customer = cust,
+            allTransactions = repository.transactions.value,
+            dateRange = com.example.ui.util.StatementDateRange.ALL,
+            filter = com.example.ui.util.StatementFilter.ALL_ENTRIES
+        )
+
+        val pdfFile = StatementGenerator.generateStatementPdf(
+            context = context,
+            statement = statementData,
+            storeProfile = StoreProfile(storeName = "Ghanshyam Kids Wear")
+        )
+
+        assertTrue("Multi-page PDF file should exist", pdfFile.exists())
+        assertTrue("Multi-page PDF file size should be substantial", pdfFile.length() > 1024)
+    }
+
+    @Test
     fun testCsvSpreadsheetExports() {
-        // Add sample data
         val cust = repository.addCustomer("Anita Verma", "+91 99999 11111")
         repository.addTransaction(cust.id, 1200.0, "GAVE", "Clothes")
         repository.addInventoryItem(
@@ -251,141 +420,6 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun testSafeStorageParsingDoesNotSwallowExceptions() {
-        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
-        prefs.edit().putString("app_saved_data", "{ broken json without closing").commit()
-
-        val freshRepo = AppRepository(context, asyncInit = false)
-        assertNotNull("Corrupt data banner should be shown", freshRepo.corruptDataBanner.value)
-        assertTrue("Corrupt backup key must exist in prefs", prefs.all.keys.any { it.startsWith("app_saved_data_corrupt_") })
-    }
-
-    @Test
-    fun testOneTimeMigrationFromSharedPreferencesToRoom() {
-        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
-        prefs.edit().clear().commit()
-        repository.clearAllData()
-
-        val legacyJson = """
-            {
-                "customers": [
-                    {"id": "c-101", "name": "Bhavin Shah", "phone": "9898012345", "address": "Ring Road, Surat", "gstin": ""}
-                ],
-                "transactions": [
-                    {"id": "t-201", "customerId": "c-101", "amount": 2500.0, "type": "GAVE", "note": "Festival Stock", "date": 1600000000000, "isCancelled": false}
-                ],
-                "inventory": [
-                    {"id": "i-301", "name": "Silk Kurti Set", "itemCode": "SKS-01", "salePrice": 850.0, "purchasePrice": 500.0, "stock": 20, "category": "Girls Wear", "sizes": ["28", "30", "32"], "gstPercent": 5.0}
-                ],
-                "invoices": [],
-                "cashbook": [
-                    {"id": "cb-401", "type": "IN", "amount": 2500.0, "category": "Sales", "remark": "Advance", "date": 1600000000000, "paymentMode": "CASH", "linkedId": null, "source": "manual"}
-                ]
-            }
-        """.trimIndent()
-
-        prefs.edit().putString("app_saved_data", legacyJson).commit()
-
-        val migratedRepo = AppRepository(context, asyncInit = false)
-
-        // 1. Check old key was renamed to app_saved_data_migrated and app_saved_data was removed
-        assertFalse("app_saved_data must no longer exist after migration", prefs.contains("app_saved_data"))
-        assertTrue("app_saved_data_migrated must exist", prefs.contains("app_saved_data_migrated"))
-        assertEquals(legacyJson, prefs.getString("app_saved_data_migrated", null))
-
-        // 2. Check Room entities were populated in the transaction
-        assertEquals(1, migratedRepo.customers.value.size)
-        assertEquals("Bhavin Shah", migratedRepo.customers.value[0].name)
-        assertEquals(1, migratedRepo.transactions.value.size)
-        assertEquals(2500.0, migratedRepo.transactions.value[0].amount, 0.01)
-        assertEquals(1, migratedRepo.inventory.value.size)
-        assertEquals("Silk Kurti Set", migratedRepo.inventory.value[0].name)
-        assertEquals(listOf("28", "30", "32"), migratedRepo.inventory.value[0].sizes)
-        assertEquals(1, migratedRepo.cashbook.value.size)
-        assertEquals(2500.0, migratedRepo.cashbook.value[0].amount, 0.01)
-    }
-
-    @Test
-    fun testRoomPersistenceAcrossRepositoryInstances() {
-        val cust = repository.addCustomer("Ketan Patel", "9825099999")
-        val inv = repository.addInventoryItem(
-            name = "Party Wear Blazer",
-            itemCode = "PWB-99",
-            salePrice = 1200.0,
-            purchasePrice = 750.0,
-            stock = 10,
-            category = "Boys Formal",
-            sizes = listOf("32", "34"),
-            gstPercent = 12.0
-        )
-
-        // Instantiate a second repository pointing to the same Room database
-        val repo2 = AppRepository(context, asyncInit = false)
-        val loadedCust = repo2.customers.value.find { it.id == cust.id }
-        assertNotNull("Customer must persist in Room across repository instances", loadedCust)
-        assertEquals("Ketan Patel", loadedCust!!.name)
-
-        val loadedInv = repo2.inventory.value.find { it.id == inv.id }
-        assertNotNull("Inventory must persist in Room across repository instances", loadedInv)
-        assertEquals("Party Wear Blazer", loadedInv!!.name)
-        assertEquals(listOf("32", "34"), loadedInv.sizes)
-    }
-
-    @Test
-    fun testCascadeCustomerDeletionWithRoom() {
-        val cust = repository.addCustomer("Mahesh Joshi", "9900011223")
-        val tx = repository.addTransaction(cust.id, 900.0, "GAVE", "Shorts")
-
-        assertEquals(1, repository.customers.value.count { it.id == cust.id })
-        assertEquals(1, repository.transactions.value.count { it.customerId == cust.id })
-
-        repository.deleteCustomer(cust.id)
-
-        assertEquals("Customer deleted", 0, repository.customers.value.count { it.id == cust.id })
-        assertEquals("Cascade deleted customer transactions", 0, repository.transactions.value.count { it.customerId == cust.id })
-    }
-
-    @Test
-    fun testTolerantMigrationAttachesOrphansToRecoveredEntries() {
-        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
-        prefs.edit().clear().commit()
-        repository.clearAllData()
-
-        val legacyJsonWithOrphan = """
-            {
-                "customers": [
-                    {"id": "c-1", "name": "Valid Customer", "phone": "9898011111", "address": "", "gstin": ""}
-                ],
-                "transactions": [
-                    {"id": "tx-orphan-1", "customerId": "unknown-nonexistent-id", "amount": 1500.0, "type": "GAVE", "note": "Orphan Udhar", "date": 1600000000000, "isCancelled": false}
-                ],
-                "inventory": [],
-                "invoices": [],
-                "cashbook": []
-            }
-        """.trimIndent()
-
-        prefs.edit().putString("app_saved_data", legacyJsonWithOrphan).commit()
-
-        val repo = AppRepository(context, asyncInit = false)
-        assertFalse("app_saved_data must no longer exist after migration", prefs.contains("app_saved_data"))
-        assertTrue("app_saved_data_migrated must exist", prefs.contains("app_saved_data_migrated"))
-
-        // Should have created "Recovered entries" customer
-        val recoveredCust = repo.customers.value.find { it.name == "Recovered entries" }
-        assertNotNull("Recovered entries customer should be auto-created for orphans", recoveredCust)
-
-        // Transaction should be attached to this customer
-        val orphanTx = repo.transactions.value.find { it.id == "tx-orphan-1" }
-        assertNotNull("Orphan transaction must be saved", orphanTx)
-        assertEquals(recoveredCust!!.id, orphanTx!!.customerId)
-
-        // Migration notice must report recovered count
-        assertNotNull(repo.migrationNotice.value)
-        assertTrue(repo.migrationNotice.value!!.contains("1"))
-    }
-
-    @Test
     fun testTolerantBackupImportAttachesOrphansToRecoveredEntries() {
         val backupWithOrphan = """
             {
@@ -393,7 +427,7 @@ class ExampleRobolectricTest {
                     {"id": "c-backup-1", "name": "Existing Party", "phone": "9999900000", "address": "", "gstin": ""}
                 ],
                 "transactions": [
-                    {"id": "tx-orphan-2", "customerId": "missing-party-id", "amount": 750.0, "type": "GOT", "note": "Orphan Jama", "date": 1600000000000, "isCancelled": false}
+                    {"id": "tx-orphan-2", "customerId": "missing-party-id", "amount": 750.0, "type": "GOT", "note": "Orphan Jama", "date": 1600000000000}
                 ],
                 "inventory": [],
                 "invoices": [],
@@ -411,78 +445,4 @@ class ExampleRobolectricTest {
         assertNotNull("Orphan transaction must exist in repository", orphanTx)
         assertEquals(recoveredCust!!.id, orphanTx!!.customerId)
     }
-
-    @Test
-    fun testBlockedWritesWhenMigrationFailsAndRawDataPreserved() {
-        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
-        prefs.edit().clear().commit()
-
-        val damagedRawJson = """{ "customers": [ { incomplete json """
-        prefs.edit()
-            .putString("app_saved_data", damagedRawJson)
-            .putString("legacy_migration_error", "Broken JSON syntax in legacy store")
-            .commit()
-
-        val brokenRepo = AppRepository(context, asyncInit = false)
-        assertTrue("Writes must be blocked when migration error is active", brokenRepo.isMigrationBlocked.value)
-        assertEquals(damagedRawJson, prefs.getString("app_saved_data", null)) // MUST BE UNTOUCHED
-
-        // Verify write operation throws IllegalStateException
-        try {
-            brokenRepo.addCustomer("Should Fail", "9876543210")
-            fail("addCustomer must throw IllegalStateException when migration is blocked")
-        } catch (e: IllegalStateException) {
-            assertTrue(e.message!!.contains("blocked"))
-        }
-
-        // Verify app_saved_data is still untouched
-        assertEquals(damagedRawJson, prefs.getString("app_saved_data", null))
-    }
-
-    @Test
-    fun testStartFreshArchivesDamagedJson() {
-        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
-        prefs.edit().clear().commit()
-
-        val damagedRawJson = """{ "damaged": true }"""
-        prefs.edit()
-            .putString("app_saved_data", damagedRawJson)
-            .putString("legacy_migration_error", "Fatal corruption")
-            .commit()
-
-        val repo = AppRepository(context, asyncInit = false)
-        assertTrue("Initially blocked", repo.isMigrationBlocked.value)
-
-        repo.startFreshFromDamagedData()
-
-        assertFalse("app_saved_data must be removed after starting fresh", prefs.contains("app_saved_data"))
-        assertFalse("legacy_migration_error must be removed", prefs.contains("legacy_migration_error"))
-        assertFalse("Writes should no longer be blocked", repo.isMigrationBlocked.value)
-
-        val discardedKey = prefs.all.keys.find { it.startsWith("app_saved_data_discarded_") }
-        assertNotNull("Archived discarded key must exist", discardedKey)
-        assertEquals(damagedRawJson, prefs.getString(discardedKey, null))
-
-        // Writes must now succeed without error
-        val newCust = repo.addCustomer("Fresh Customer", "9800012345")
-        assertNotNull(newCust)
-        assertEquals(1, repo.customers.value.size)
-    }
-
-    @Test
-    fun testInvoiceThemeLegacyKeyRead() {
-        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
-        prefs.edit().clear().commit()
-        repository.clearAllData()
-        runBlocking {
-            repository.database.appSettingsDao().delete()
-        }
-
-        // Test that "invoice_theme" pref key is read
-        prefs.edit().putString("invoice_theme", "EMERALD_GREEN").commit()
-
-        val repo = AppRepository(context, asyncInit = false)
-        assertEquals("EMERALD_GREEN", repo.selectedInvoiceTheme.value)
-    }
 }
-

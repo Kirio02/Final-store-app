@@ -2,12 +2,27 @@ package com.example.model
 
 import java.util.UUID
 
+enum class PartyType(val raw: String) {
+    CUSTOMER("CUSTOMER"),
+    SUPPLIER("SUPPLIER");
+
+    companion object {
+        fun fromString(value: String?): PartyType {
+            return when (value?.uppercase()) {
+                "SUPPLIER" -> SUPPLIER
+                else -> CUSTOMER
+            }
+        }
+    }
+}
+
 data class Customer(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
     val phone: String,
     val address: String = "",
     val gstin: String = "",
+    val type: String = "CUSTOMER", // "CUSTOMER" or "SUPPLIER"
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -15,10 +30,12 @@ data class Transaction(
     val id: String = UUID.randomUUID().toString(),
     val customerId: String,
     val amount: Double,
-    val type: String, // "GAVE" (Udhar) or "GOT" (Jama)
+    val type: String, // "GAVE" or "GOT"
     val note: String = "",
     val date: Long = System.currentTimeMillis(),
-    val isCancelled: Boolean = false, // Manual cancel out tick box
+    val paymentMode: String = "CASH", // CASH, UPI, BANK
+    val linkedToTxId: String? = null, // Links payment to a specific credit bill
+    val isCompleted: Boolean = false, // Plain checkbox (goods delivered/packed), no money effect
     val billNumber: String = ""
 )
 
@@ -108,7 +125,8 @@ data class CsvCustomerPreview(
     val name: String,
     val phone: String,
     val balance: Double,
-    val isDuplicate: Boolean
+    val isDuplicate: Boolean,
+    val type: String = "CUSTOMER"
 )
 
 enum class AppLanguage(val code: String, val displayName: String, val nativeName: String) {
