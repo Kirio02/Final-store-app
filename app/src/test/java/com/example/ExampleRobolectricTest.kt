@@ -28,6 +28,7 @@ class ExampleRobolectricTest {
         val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
         repository = AppRepository(context)
+        repository.clearAllData()
     }
 
     @Test
@@ -258,4 +259,90 @@ class ExampleRobolectricTest {
         assertNotNull("Corrupt data banner should be shown", freshRepo.corruptDataBanner.value)
         assertTrue("Corrupt backup key must exist in prefs", prefs.all.keys.any { it.startsWith("app_saved_data_corrupt_") })
     }
+
+    @Test
+    fun testOneTimeMigrationFromSharedPreferencesToRoom() {
+        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        repository.clearAllData()
+
+        val legacyJson = """
+            {
+                "customers": [
+                    {"id": "c-101", "name": "Bhavin Shah", "phone": "9898012345", "address": "Ring Road, Surat", "gstin": ""}
+                ],
+                "transactions": [
+                    {"id": "t-201", "customerId": "c-101", "amount": 2500.0, "type": "GAVE", "note": "Festival Stock", "date": 1600000000000, "isCancelled": false}
+                ],
+                "inventory": [
+                    {"id": "i-301", "name": "Silk Kurti Set", "itemCode": "SKS-01", "salePrice": 850.0, "purchasePrice": 500.0, "stock": 20, "category": "Girls Wear", "sizes": ["28", "30", "32"], "gstPercent": 5.0}
+                ],
+                "invoices": [],
+                "cashbook": [
+                    {"id": "cb-401", "type": "IN", "amount": 2500.0, "category": "Sales", "remark": "Advance", "date": 1600000000000, "paymentMode": "CASH", "linkedId": null, "source": "manual"}
+                ]
+            }
+        """.trimIndent()
+
+        prefs.edit().putString("app_saved_data", legacyJson).commit()
+
+        val migratedRepo = AppRepository(context)
+
+        // 1. Check old key was renamed to app_saved_data_migrated and app_saved_data was removed
+        assertFalse("app_saved_data must no longer exist after migration", prefs.contains("app_saved_data"))
+        assertTrue("app_saved_data_migrated must exist", prefs.contains("app_saved_data_migrated"))
+        assertEquals(legacyJson, prefs.getString("app_saved_data_migrated", null))
+
+        // 2. Check Room entities were populated in the transaction
+        assertEquals(1, migratedRepo.customers.value.size)
+        assertEquals("Bhavin Shah", migratedRepo.customers.value[0].name)
+        assertEquals(1, migratedRepo.transactions.value.size)
+        assertEquals(2500.0, migratedRepo.transactions.value[0].amount, 0.01)
+        assertEquals(1, migratedRepo.inventory.value.size)
+        assertEquals("Silk Kurti Set", migratedRepo.inventory.value[0].name)
+        assertEquals(listOf("28", "30", "32"), migratedRepo.inventory.value[0].sizes)
+        assertEquals(1, migratedRepo.cashbook.value.size)
+        assertEquals(2500.0, migratedRepo.cashbook.value[0].amount, 0.01)
+    }
+
+    @Test
+    fun testRoomPersistenceAcrossRepositoryInstances() {
+        val cust = repository.addCustomer("Ketan Patel", "9825099999")
+        val inv = repository.addInventoryItem(
+            name = "Party Wear Blazer",
+            itemCode = "PWB-99",
+            salePrice = 1200.0,
+            purchasePrice = 750.0,
+            stock = 10,
+            category = "Boys Formal",
+            sizes = listOf("32", "34"),
+            gstPercent = 12.0
+        )
+
+        // Instantiate a second repository pointing to the same Room database
+        val repo2 = AppRepository(context)
+        val loadedCust = repo2.customers.value.find { it.id == cust.id }
+        assertNotNull("Customer must persist in Room across repository instances", loadedCust)
+        assertEquals("Ketan Patel", loadedCust!!.name)
+
+        val loadedInv = repo2.inventory.value.find { it.id == inv.id }
+        assertNotNull("Inventory must persist in Room across repository instances", loadedInv)
+        assertEquals("Party Wear Blazer", loadedInv!!.name)
+        assertEquals(listOf("32", "34"), loadedInv.sizes)
+    }
+
+    @Test
+    fun testCascadeCustomerDeletionWithRoom() {
+        val cust = repository.addCustomer("Mahesh Joshi", "9900011223")
+        val tx = repository.addTransaction(cust.id, 900.0, "GAVE", "Shorts")
+
+        assertEquals(1, repository.customers.value.count { it.id == cust.id })
+        assertEquals(1, repository.transactions.value.count { it.customerId == cust.id })
+
+        repository.deleteCustomer(cust.id)
+
+        assertEquals("Customer deleted", 0, repository.customers.value.count { it.id == cust.id })
+        assertEquals("Cascade deleted customer transactions", 0, repository.transactions.value.count { it.customerId == cust.id })
+    }
 }
+

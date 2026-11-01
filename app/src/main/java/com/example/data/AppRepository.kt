@@ -1,26 +1,32 @@
 package com.example.data
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.content.Intent
 import android.util.Log
 import androidx.core.content.FileProvider
+import androidx.room.withTransaction
+import com.example.data.local.*
 import com.example.model.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.UUID
+import java.util.*
 
-class AppRepository(context: Context) {
+class AppRepository(
+    val context: Context,
+    val database: AppDatabase = AppDatabase.getInstance(context)
+) {
+    private val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    private val prefs: SharedPreferences =
-        context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+    private val _corruptDataBanner = MutableStateFlow<String?>(null)
+    val corruptDataBanner: StateFlow<String?> = _corruptDataBanner.asStateFlow()
 
     private val _customers = MutableStateFlow<List<Customer>>(emptyList())
     val customers: StateFlow<List<Customer>> = _customers.asStateFlow()
@@ -37,85 +43,304 @@ class AppRepository(context: Context) {
     private val _cashbook = MutableStateFlow<List<CashEntry>>(emptyList())
     val cashbook: StateFlow<List<CashEntry>> = _cashbook.asStateFlow()
 
-    private val _storeProfile = MutableStateFlow(StoreProfile())
+    private val _storeProfile = MutableStateFlow<StoreProfile>(StoreProfile())
     val storeProfile: StateFlow<StoreProfile> = _storeProfile.asStateFlow()
 
-    private val _language = MutableStateFlow(AppLanguage.HINGLISH)
+    private val _language = MutableStateFlow<AppLanguage>(AppLanguage.HINGLISH)
     val language: StateFlow<AppLanguage> = _language.asStateFlow()
 
-    private val _hasCompletedOnboarding = MutableStateFlow(false)
-    val hasCompletedOnboarding: StateFlow<Boolean> = _hasCompletedOnboarding.asStateFlow()
-
-    private val _selectedInvoiceTheme = MutableStateFlow("PREMIUM_BLUE")
+    private val _selectedInvoiceTheme = MutableStateFlow<String>("PREMIUM_BLUE")
     val selectedInvoiceTheme: StateFlow<String> = _selectedInvoiceTheme.asStateFlow()
 
-    private val _corruptDataBanner = MutableStateFlow<String?>(null)
-    val corruptDataBanner: StateFlow<String?> = _corruptDataBanner.asStateFlow()
+    private val _hasCompletedOnboarding = MutableStateFlow<Boolean>(false)
+    val hasCompletedOnboarding: StateFlow<Boolean> = _hasCompletedOnboarding.asStateFlow()
 
     init {
-        loadData()
+        performOneTimeMigrationIfNeeded()
+        refreshAllInMemoryCaches()
+        startRoomFlowCollectors()
     }
 
-    private fun loadData() {
-        _hasCompletedOnboarding.value = prefs.getBoolean("has_completed_onboarding", false)
+    private fun refreshAllInMemoryCaches() = runBlocking(Dispatchers.IO) {
+        _customers.value = database.customerDao().getAllList().map { it.toDomain() }
+        _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+        _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
+        _invoices.value = database.invoiceDao().getAllWithItemsList().map { it.toDomain() }
+        _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+        _storeProfile.value = database.storeProfileDao().getProfileDirect()?.toDomain() ?: StoreProfile()
+        val settings = database.appSettingsDao().getSettingsDirect()
+        _language.value = when (settings?.language?.lowercase()) {
+            "hi", "hindi" -> AppLanguage.HINDI
+            "gu", "gujarati" -> AppLanguage.GUJARATI
+            "en", "english" -> AppLanguage.ENGLISH
+            else -> AppLanguage.HINGLISH
+        }
+        _selectedInvoiceTheme.value = settings?.theme ?: "PREMIUM_BLUE"
+        _hasCompletedOnboarding.value = settings?.hasCompletedOnboarding ?: false
+    }
 
-        val langCode = prefs.getString("selected_language", AppLanguage.HINGLISH.code)
-        _language.value = AppLanguage.entries.find { it.code == langCode } ?: AppLanguage.HINGLISH
+    private fun startRoomFlowCollectors() {
+        database.customerDao().getAll()
+            .map { list -> list.map { it.toDomain() } }
+            .onEach { _customers.value = it }
+            .launchIn(repositoryScope)
 
-        _selectedInvoiceTheme.value = prefs.getString("invoice_theme", "PREMIUM_BLUE") ?: "PREMIUM_BLUE"
+        database.transactionDao().getAll()
+            .map { list -> list.map { it.toDomain() } }
+            .onEach { _transactions.value = it }
+            .launchIn(repositoryScope)
 
-        // Load store profile with clean defaults
-        val storeName = prefs.getString("store_name", "") ?: ""
-        val storeAddress = prefs.getString("store_address", "") ?: ""
-        val storePhone = prefs.getString("store_phone", "") ?: ""
-        val storeUpi = prefs.getString("store_upi", "") ?: ""
-        val storeGstin = prefs.getString("store_gstin", "") ?: ""
-        val ownerName = prefs.getString("owner_name", "") ?: ""
-        val storeState = prefs.getString("store_state", "Gujarat") ?: "Gujarat"
+        database.inventoryDao().getAll()
+            .map { list -> list.map { it.toDomain() } }
+            .onEach { _inventory.value = it }
+            .launchIn(repositoryScope)
 
-        _storeProfile.value = StoreProfile(
-            storeName = storeName,
-            address = storeAddress,
-            phone = storePhone,
-            upiId = storeUpi,
-            gstin = storeGstin,
-            ownerName = ownerName,
-            state = storeState
-        )
+        database.invoiceDao().getAllWithItems()
+            .map { list -> list.map { it.toDomain() } }
+            .onEach { _invoices.value = it }
+            .launchIn(repositoryScope)
 
-        val isInitialized = prefs.getBoolean("has_clean_initialized_v7", false)
-        if (!isInitialized) {
-            // Fresh clean start: everything empty as explicitly requested
-            _customers.value = emptyList()
-            _transactions.value = emptyList()
-            _inventory.value = emptyList()
-            _invoices.value = emptyList()
-            _cashbook.value = emptyList()
-            prefs.edit().putBoolean("has_clean_initialized_v7", true).commit()
-            saveData()
-        } else {
-            loadFromStorage()
+        database.cashbookDao().getAll()
+            .map { list -> list.map { it.toDomain() } }
+            .onEach { _cashbook.value = it }
+            .launchIn(repositoryScope)
+
+        database.storeProfileDao().getProfile()
+            .map { it?.toDomain() ?: StoreProfile() }
+            .onEach { _storeProfile.value = it }
+            .launchIn(repositoryScope)
+
+        database.appSettingsDao().getSettings()
+            .onEach { settings ->
+                if (settings != null) {
+                    _language.value = when (settings.language.lowercase()) {
+                        "hi", "hindi" -> AppLanguage.HINDI
+                        "gu", "gujarati" -> AppLanguage.GUJARATI
+                        "en", "english" -> AppLanguage.ENGLISH
+                        else -> AppLanguage.HINGLISH
+                    }
+                    _selectedInvoiceTheme.value = settings.theme
+                    _hasCompletedOnboarding.value = settings.hasCompletedOnboarding
+                }
+            }
+            .launchIn(repositoryScope)
+    }
+
+    // ==========================================
+    // ONE-TIME MIGRATION (SharedPreferences -> Room)
+    // ==========================================
+
+    private fun performOneTimeMigrationIfNeeded() = runBlocking(Dispatchers.IO) {
+        if (!prefs.contains("app_saved_data")) {
+            ensureDefaultProfileAndSettings()
+            return@runBlocking
+        }
+
+        val savedJson = prefs.getString("app_saved_data", null)
+        if (savedJson.isNullOrBlank()) {
+            prefs.edit().putString("app_saved_data_migrated", "").remove("app_saved_data").commit()
+            ensureDefaultProfileAndSettings()
+            return@runBlocking
+        }
+
+        try {
+            val json = JSONObject(savedJson)
+            val tempCustomers = mutableListOf<CustomerEntity>()
+            val tempTransactions = mutableListOf<TransactionEntity>()
+            val tempInventory = mutableListOf<InventoryItemEntity>()
+            val tempInvoices = mutableListOf<InvoiceEntity>()
+            val tempInvoiceItems = mutableListOf<InvoiceItemEntity>()
+            val tempCashbook = mutableListOf<CashEntryEntity>()
+
+            if (json.has("customers")) {
+                val arr = json.getJSONArray("customers")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    tempCustomers.add(CustomerEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        name = o.optString("name", ""),
+                        phone = o.optString("phone", ""),
+                        address = o.optString("address", ""),
+                        gstin = o.optString("gstin", ""),
+                        createdAt = o.optLong("createdAt", System.currentTimeMillis())
+                    ))
+                }
+            }
+
+            if (json.has("transactions")) {
+                val arr = json.getJSONArray("transactions")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    tempTransactions.add(TransactionEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        customerId = o.optString("customerId", ""),
+                        amount = o.optDouble("amount", 0.0),
+                        type = o.optString("type", "GAVE"),
+                        note = o.optString("note", ""),
+                        date = o.optLong("date", System.currentTimeMillis()),
+                        isCancelled = o.optBoolean("isCancelled", false),
+                        billNumber = o.optString("billNumber", "")
+                    ))
+                }
+            }
+
+            if (json.has("inventory")) {
+                val arr = json.getJSONArray("inventory")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val sizesArr = o.optJSONArray("sizes")
+                    val sizes = mutableListOf<String>()
+                    if (sizesArr != null) {
+                        for (j in 0 until sizesArr.length()) {
+                            sizes.add(sizesArr.getString(j))
+                        }
+                    }
+                    tempInventory.add(InventoryItemEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        name = o.optString("name", ""),
+                        itemCode = o.optString("itemCode", ""),
+                        salePrice = o.optDouble("salePrice", 0.0),
+                        purchasePrice = o.optDouble("purchasePrice", 0.0),
+                        stock = o.optInt("stock", 0),
+                        category = o.optString("category", "General"),
+                        sizes = sizes,
+                        gstPercent = o.optDouble("gstPercent", 0.0)
+                    ))
+                }
+            }
+
+            if (json.has("invoices")) {
+                val arr = json.getJSONArray("invoices")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val invId = o.optString("id", UUID.randomUUID().toString())
+                    tempInvoices.add(InvoiceEntity(
+                        id = invId,
+                        billNumber = o.optString("billNumber", ""),
+                        date = o.optLong("date", System.currentTimeMillis()),
+                        customerName = o.optString("customerName", ""),
+                        customerPhone = o.optString("customerPhone", ""),
+                        subtotal = o.optDouble("subtotal", 0.0),
+                        gstAmount = o.optDouble("gstAmount", 0.0),
+                        discount = o.optDouble("discount", 0.0),
+                        additionalCharges = o.optDouble("additionalCharges", 0.0),
+                        totalAmount = o.optDouble("totalAmount", 0.0),
+                        paymentMode = o.optString("paymentMode", "CASH"),
+                        stateOfSupply = o.optString("stateOfSupply", "Gujarat"),
+                        gstin = o.optString("gstin", ""),
+                        notes = o.optString("notes", ""),
+                        themeName = o.optString("themeName", "PREMIUM_BLUE")
+                    ))
+
+                    val itemsArr = o.optJSONArray("items")
+                    if (itemsArr != null) {
+                        for (j in 0 until itemsArr.length()) {
+                            val io = itemsArr.getJSONObject(j)
+                            tempInvoiceItems.add(InvoiceItemEntity(
+                                id = io.optString("id", UUID.randomUUID().toString()),
+                                invoiceId = invId,
+                                name = io.optString("name", ""),
+                                quantity = io.optInt("quantity", 1),
+                                unitPrice = io.optDouble("unitPrice", 0.0),
+                                gstPercent = io.optDouble("gstPercent", 0.0),
+                                total = io.optDouble("total", 0.0)
+                            ))
+                        }
+                    }
+                }
+            }
+
+            if (json.has("cashbook")) {
+                val arr = json.getJSONArray("cashbook")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    tempCashbook.add(CashEntryEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        type = o.optString("type", "IN"),
+                        amount = o.optDouble("amount", 0.0),
+                        category = o.optString("category", ""),
+                        remark = o.optString("remark", ""),
+                        date = o.optLong("date", System.currentTimeMillis()),
+                        paymentMode = o.optString("paymentMode", "CASH"),
+                        linkedId = if (o.has("linkedId") && !o.isNull("linkedId")) o.getString("linkedId") else null,
+                        source = o.optString("source", "manual")
+                    ))
+                }
+            }
+
+            val storeProfile = StoreProfileEntity(
+                id = 1,
+                storeName = prefs.getString("store_name", "") ?: "",
+                address = prefs.getString("store_address", "") ?: "",
+                phone = prefs.getString("store_phone", "") ?: "",
+                upiId = prefs.getString("store_upi", "") ?: "",
+                gstin = prefs.getString("store_gstin", "") ?: "",
+                ownerName = prefs.getString("owner_name", "") ?: "",
+                state = prefs.getString("store_state", "Gujarat") ?: "Gujarat"
+            )
+
+            val appSettings = AppSettingsEntity(
+                id = 1,
+                language = prefs.getString("selected_language", "hinglish") ?: "hinglish",
+                theme = prefs.getString("selected_invoice_theme", "PREMIUM_BLUE") ?: "PREMIUM_BLUE",
+                hasCompletedOnboarding = prefs.getBoolean("has_completed_onboarding", false)
+            )
+
+            // Insert everything inside ONE atomic transaction
+            database.withTransaction {
+                database.customerDao().insertAll(tempCustomers)
+                database.transactionDao().insertAll(tempTransactions)
+                database.inventoryDao().insertAll(tempInventory)
+                database.invoiceDao().insertInvoices(tempInvoices)
+                database.invoiceDao().insertItems(tempInvoiceItems)
+                database.cashbookDao().insertAll(tempCashbook)
+                database.storeProfileDao().insertOrUpdate(storeProfile)
+                database.appSettingsDao().insertOrUpdate(appSettings)
+            }
+
+            // Only after success rename the old key to app_saved_data_migrated (do not delete it)
+            prefs.edit()
+                .putString("app_saved_data_migrated", savedJson)
+                .remove("app_saved_data")
+                .commit()
+
+            Log.i("AppRepository", "Migration to Room succeeded.")
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Error during one-time migration: ${e.message}", e)
+            val timestamp = System.currentTimeMillis()
+            prefs.edit().putString("app_saved_data_corrupt_$timestamp", savedJson).commit()
+            _corruptDataBanner.value = "Data migration error detected. Corrupt data backed up safely."
         }
     }
 
-    fun completeOnboarding() {
-        _hasCompletedOnboarding.value = true
-        prefs.edit().putBoolean("has_completed_onboarding", true).commit()
-    }
+    private suspend fun ensureDefaultProfileAndSettings() {
+        val existingProfile = database.storeProfileDao().getProfileDirect()
+        if (existingProfile == null) {
+            database.storeProfileDao().insertOrUpdate(
+                StoreProfileEntity(
+                    id = 1,
+                    storeName = prefs.getString("store_name", "") ?: "",
+                    address = prefs.getString("store_address", "") ?: "",
+                    phone = prefs.getString("store_phone", "") ?: "",
+                    upiId = prefs.getString("store_upi", "") ?: "",
+                    gstin = prefs.getString("store_gstin", "") ?: "",
+                    ownerName = prefs.getString("owner_name", "") ?: "",
+                    state = prefs.getString("store_state", "Gujarat") ?: "Gujarat"
+                )
+            )
+        }
 
-    fun resetOnboarding() {
-        _hasCompletedOnboarding.value = false
-        prefs.edit().putBoolean("has_completed_onboarding", false).commit()
-    }
-
-    fun setLanguage(newLanguage: AppLanguage) {
-        _language.value = newLanguage
-        prefs.edit().putString("selected_language", newLanguage.code).commit()
-    }
-
-    fun setInvoiceTheme(themeId: String) {
-        _selectedInvoiceTheme.value = themeId
-        prefs.edit().putString("invoice_theme", themeId).commit()
+        val existingSettings = database.appSettingsDao().getSettingsDirect()
+        if (existingSettings == null) {
+            database.appSettingsDao().insertOrUpdate(
+                AppSettingsEntity(
+                    id = 1,
+                    language = prefs.getString("selected_language", "hinglish") ?: "hinglish",
+                    theme = prefs.getString("selected_invoice_theme", "PREMIUM_BLUE") ?: "PREMIUM_BLUE",
+                    hasCompletedOnboarding = prefs.getBoolean("has_completed_onboarding", false)
+                )
+            )
+        }
     }
 
     fun dismissCorruptDataBanner() {
@@ -123,14 +348,13 @@ class AppRepository(context: Context) {
     }
 
     fun startFreshAfterCorruption() {
-        _customers.value = emptyList()
-        _transactions.value = emptyList()
-        _inventory.value = emptyList()
-        _invoices.value = emptyList()
-        _cashbook.value = emptyList()
+        clearAllData()
         _corruptDataBanner.value = null
-        saveData()
     }
+
+    // ==========================================
+    // STORE PROFILE & SETTINGS
+    // ==========================================
 
     fun updateStoreProfile(
         storeName: String,
@@ -141,41 +365,117 @@ class AppRepository(context: Context) {
         ownerName: String,
         state: String = "Gujarat"
     ) {
-        _storeProfile.value = StoreProfile(storeName, address, phone, upiId, gstin, ownerName, state)
-        prefs.edit()
-            .putString("store_name", storeName)
-            .putString("store_address", address)
-            .putString("store_phone", phone)
-            .putString("store_upi", upiId)
-            .putString("store_gstin", gstin)
-            .putString("owner_name", ownerName)
-            .putString("store_state", state)
-            .commit()
+        val profile = StoreProfileEntity(
+            id = 1,
+            storeName = storeName,
+            address = address,
+            phone = phone,
+            upiId = upiId,
+            gstin = gstin,
+            ownerName = ownerName,
+            state = state
+        )
+        runBlocking(Dispatchers.IO) {
+            database.storeProfileDao().insertOrUpdate(profile)
+            _storeProfile.value = profile.toDomain()
+        }
     }
 
-    // Customer operations
+    fun setLanguage(newLanguage: AppLanguage) {
+        runBlocking(Dispatchers.IO) {
+            val current = database.appSettingsDao().getSettingsDirect() ?: AppSettingsEntity(id = 1)
+            database.appSettingsDao().insertOrUpdate(current.copy(language = newLanguage.code))
+            _language.value = newLanguage
+        }
+    }
+
+    fun setInvoiceTheme(theme: String) {
+        runBlocking(Dispatchers.IO) {
+            val current = database.appSettingsDao().getSettingsDirect() ?: AppSettingsEntity(id = 1)
+            database.appSettingsDao().insertOrUpdate(current.copy(theme = theme))
+            _selectedInvoiceTheme.value = theme
+        }
+    }
+
+    fun completeOnboarding() {
+        runBlocking(Dispatchers.IO) {
+            val current = database.appSettingsDao().getSettingsDirect() ?: AppSettingsEntity(id = 1)
+            database.appSettingsDao().insertOrUpdate(current.copy(hasCompletedOnboarding = true))
+            _hasCompletedOnboarding.value = true
+        }
+    }
+
+    // ==========================================
+    // CUSTOMER OPERATIONS
+    // ==========================================
+
     fun addCustomer(name: String, phone: String, address: String = "", gstin: String = ""): Customer {
-        val newCustomer = Customer(
+        val newCustomer = CustomerEntity(
             name = name.trim(),
             phone = phone.trim(),
             address = address.trim(),
             gstin = gstin.trim()
         )
-        _customers.value = listOf(newCustomer) + _customers.value
-        saveData()
-        return newCustomer
+        runBlocking(Dispatchers.IO) {
+            database.customerDao().insert(newCustomer)
+            _customers.value = database.customerDao().getAllList().map { it.toDomain() }
+        }
+        return newCustomer.toDomain()
+    }
+
+    fun updateCustomer(id: String, name: String, phone: String, address: String = "", gstin: String = "") {
+        runBlocking(Dispatchers.IO) {
+            val current = database.customerDao().getById(id)
+            if (current != null) {
+                database.customerDao().update(
+                    current.copy(
+                        name = name.trim(),
+                        phone = phone.trim(),
+                        address = address.trim(),
+                        gstin = gstin.trim()
+                    )
+                )
+                _customers.value = database.customerDao().getAllList().map { it.toDomain() }
+            }
+        }
     }
 
     fun deleteCustomer(customerId: String) {
-        val custTxIds = _transactions.value.filter { it.customerId == customerId }.map { it.id }.toSet()
-        _customers.value = _customers.value.filter { it.id != customerId }
-        _transactions.value = _transactions.value.filter { it.customerId != customerId }
-        _cashbook.value = _cashbook.value.filter { it.linkedId !in custTxIds }
-        saveData()
+        runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                val txs = database.transactionDao().getByCustomerId(customerId)
+                val txIds = txs.map { it.id }
+                if (txIds.isNotEmpty()) {
+                    database.cashbookDao().deleteByLinkedIds(txIds)
+                }
+                database.transactionDao().deleteByCustomerId(customerId)
+                database.customerDao().deleteById(customerId)
+            }
+            _customers.value = database.customerDao().getAllList().map { it.toDomain() }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+        }
     }
 
-    // Transaction operations (Udhar / Jama)
-    // Note: addTransaction() must NOT post to the cashbook by itself! Caller controls cashbook entry.
+    fun getCustomerBalance(customerId: String): Double {
+        val txs = transactions.value.filter { it.customerId == customerId && !it.isCancelled }
+        val gave = txs.filter { it.type == "GAVE" }.sumOf { it.amount }
+        val got = txs.filter { it.type == "GOT" }.sumOf { it.amount }
+        return gave - got
+    }
+
+    fun getTotalReceivable(): Double {
+        return customers.value.sumOf { getCustomerBalance(it.id).coerceAtLeast(0.0) }
+    }
+
+    fun getTotalPayable(): Double {
+        return customers.value.sumOf { (-getCustomerBalance(it.id)).coerceAtLeast(0.0) }
+    }
+
+    // ==========================================
+    // TRANSACTION OPERATIONS
+    // ==========================================
+
     fun addTransaction(
         customerId: String,
         amount: Double,
@@ -183,31 +483,41 @@ class AppRepository(context: Context) {
         note: String = "",
         billNumber: String = ""
     ): Transaction {
-        val newTx = Transaction(
+        val newTx = TransactionEntity(
             customerId = customerId,
             amount = amount,
             type = type,
             note = note,
             billNumber = billNumber
         )
-        _transactions.value = listOf(newTx) + _transactions.value
-        saveData()
-        return newTx
+        runBlocking(Dispatchers.IO) {
+            database.transactionDao().insert(newTx)
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+        }
+        return newTx.toDomain()
     }
 
-    // Manual tick box to cancel out an udhar entry (e.g. "You gave - 1850")
     fun toggleTransactionCancel(transactionId: String) {
-        _transactions.value = _transactions.value.map { tx ->
-            if (tx.id == transactionId) {
-                tx.copy(isCancelled = !tx.isCancelled)
-            } else {
-                tx
+        runBlocking(Dispatchers.IO) {
+            val current = database.transactionDao().getById(transactionId)
+            if (current != null) {
+                database.transactionDao().update(current.copy(isCancelled = !current.isCancelled))
+                _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
             }
         }
-        saveData()
     }
 
-    // Smart Settle (The Notebook Method): Handles full or partial settlements and balances Cashbook
+    fun deleteTransaction(transactionId: String) {
+        runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                database.cashbookDao().deleteByLinkedId(transactionId)
+                database.transactionDao().deleteById(transactionId)
+            }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+        }
+    }
+
     fun smartSettleTransaction(
         transactionId: String,
         settledAmount: Double,
@@ -215,102 +525,87 @@ class AppRepository(context: Context) {
         paymentMode: String = "CASH",
         addToCashbook: Boolean = true
     ): Boolean {
-        val tx = _transactions.value.find { it.id == transactionId } ?: return false
-        val cleanSettled = settledAmount.coerceIn(0.01, tx.amount)
+        return runBlocking(Dispatchers.IO) {
+            val success = database.withTransaction {
+                val tx = database.transactionDao().getById(transactionId) ?: return@withTransaction false
+                val cleanSettled = settledAmount.coerceIn(0.01, tx.amount)
 
-        // 1. Mark original transaction as cancelled (struck through in notebook)
-        _transactions.value = _transactions.value.map {
-            if (it.id == transactionId) it.copy(isCancelled = true) else it
-        }
+                // 1. Mark original transaction as cancelled
+                database.transactionDao().update(tx.copy(isCancelled = true))
 
-        // 2. Add balancing entry to Cashbook if enabled
-        if (addToCashbook) {
-            if (tx.type == "GAVE") {
-                // Settling Udhar: customer gave payment to shop -> Cash IN
-                addCashEntry(
-                    type = "IN",
-                    amount = cleanSettled,
-                    category = "Khata Settlement",
-                    remark = if (cleanSettled >= tx.amount - 0.001) {
-                        "Settled Udhar from $customerName"
-                    } else {
-                        "Partial payment from $customerName (Orig: ₹${"%.2f".format(tx.amount)})"
-                    },
-                    paymentMode = paymentMode,
-                    linkedId = tx.id,
-                    source = "settlement"
-                )
-            } else if (tx.type == "GOT") {
-                // Settling Jama / advance: shop returns/adjusts -> Cash OUT
-                addCashEntry(
-                    type = "OUT",
-                    amount = cleanSettled,
-                    category = "Khata Settlement",
-                    remark = if (cleanSettled >= tx.amount - 0.001) {
-                        "Settled Jama for $customerName"
-                    } else {
-                        "Partial settlement for $customerName"
-                    },
-                    paymentMode = paymentMode,
-                    linkedId = tx.id,
-                    source = "settlement"
-                )
+                // 2. Add balancing entry to Cashbook if enabled
+                if (addToCashbook) {
+                    if (tx.type == "GAVE") {
+                        database.cashbookDao().insert(
+                            CashEntryEntity(
+                                type = "IN",
+                                amount = cleanSettled,
+                                category = "Khata Settlement",
+                                remark = if (cleanSettled >= tx.amount - 0.001) {
+                                    "Settled Udhar from $customerName"
+                                } else {
+                                    "Partial payment from $customerName (Orig: ₹${"%.2f".format(tx.amount)})"
+                                },
+                                paymentMode = paymentMode,
+                                linkedId = tx.id,
+                                source = "settlement"
+                            )
+                        )
+                    } else if (tx.type == "GOT") {
+                        database.cashbookDao().insert(
+                            CashEntryEntity(
+                                type = "OUT",
+                                amount = cleanSettled,
+                                category = "Khata Settlement",
+                                remark = if (cleanSettled >= tx.amount - 0.001) {
+                                    "Settled Jama for $customerName"
+                                } else {
+                                    "Partial settlement for $customerName"
+                                },
+                                paymentMode = paymentMode,
+                                linkedId = tx.id,
+                                source = "settlement"
+                            )
+                        )
+                    }
+                }
+
+                // 3. If partial settlement, add remainder line item
+                val remainder = tx.amount - cleanSettled
+                if (remainder >= 0.01) {
+                    database.transactionDao().insert(
+                        TransactionEntity(
+                            customerId = tx.customerId,
+                            amount = remainder,
+                            type = tx.type,
+                            note = "Remaining balance after ₹${"%.2f".format(cleanSettled)} settlement (${tx.note.ifBlank { "Original entry" }})"
+                        )
+                    )
+                }
+
+                true
             }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+            success
         }
-
-        // 3. Partial Payment: If settledAmount < tx.amount
-        val remaining = tx.amount - cleanSettled
-        if (remaining > 0.009) {
-            val remainingTx = Transaction(
-                customerId = tx.customerId,
-                amount = remaining,
-                type = tx.type,
-                note = "Remaining balance (after ₹${"%.2f".format(cleanSettled)} settled)${if (tx.note.isNotBlank()) " • " + tx.note else ""}",
-                billNumber = tx.billNumber,
-                date = System.currentTimeMillis()
-            )
-            _transactions.value = listOf(remainingTx) + _transactions.value
-        }
-
-        saveData()
-        return true
     }
 
-    fun deleteTransaction(transactionId: String) {
-        _transactions.value = _transactions.value.filter { it.id != transactionId }
-        // Money-moving logic is reversible: remove linked cashbook entries
-        _cashbook.value = _cashbook.value.filter { it.linkedId != transactionId }
-        saveData()
-    }
+    // ==========================================
+    // INVENTORY OPERATIONS
+    // ==========================================
 
-    // Balance calculations
-    fun getCustomerBalance(customerId: String): Double {
-        val activeTx = _transactions.value.filter { it.customerId == customerId && !it.isCancelled }
-        val gave = activeTx.filter { it.type == "GAVE" }.sumOf { it.amount }
-        val got = activeTx.filter { it.type == "GOT" }.sumOf { it.amount }
-        return gave - got // Positive means customer owes shop (Udhar/Receivable)
-    }
-
-    fun getTotalReceivable(): Double {
-        return _customers.value.map { getCustomerBalance(it.id) }.filter { it > 0 }.sum()
-    }
-
-    fun getTotalPayable(): Double {
-        return _customers.value.map { getCustomerBalance(it.id) }.filter { it < 0 }.sumOf { -it }
-    }
-
-    // Inventory operations
     fun addInventoryItem(
         name: String,
-        itemCode: String,
+        itemCode: String = "",
         salePrice: Double,
         purchasePrice: Double = 0.0,
-        stock: Int,
+        stock: Int = 0,
         category: String = "General",
         sizes: List<String> = emptyList(),
         gstPercent: Double = 0.0
     ): InventoryItem {
-        val item = InventoryItem(
+        val newItem = InventoryItemEntity(
             name = name.trim(),
             itemCode = itemCode.trim(),
             salePrice = salePrice,
@@ -320,97 +615,138 @@ class AppRepository(context: Context) {
             sizes = sizes,
             gstPercent = gstPercent
         )
-        _inventory.value = listOf(item) + _inventory.value
-        saveData()
-        return item
+        runBlocking(Dispatchers.IO) {
+            database.inventoryDao().insert(newItem)
+            _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
+        }
+        return newItem.toDomain()
     }
 
-    fun updateInventoryStock(itemId: String, delta: Int) {
-        _inventory.value = _inventory.value.map { item ->
-            if (item.id == itemId) {
-                item.copy(stock = (item.stock + delta).coerceAtLeast(0))
-            } else {
-                item
+    fun updateInventoryStock(itemId: String, stockDelta: Int) {
+        runBlocking(Dispatchers.IO) {
+            val current = database.inventoryDao().getById(itemId)
+            if (current != null) {
+                val newStock = (current.stock + stockDelta).coerceAtLeast(0)
+                database.inventoryDao().update(current.copy(stock = newStock))
+                _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
             }
         }
-        saveData()
     }
 
     fun deleteInventoryItem(itemId: String) {
-        _inventory.value = _inventory.value.filter { it.id != itemId }
-        saveData()
+        runBlocking(Dispatchers.IO) {
+            database.inventoryDao().deleteById(itemId)
+            _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
+        }
     }
 
-    // Invoices operations
+    // ==========================================
+    // INVOICE OPERATIONS (All-or-Nothing Transaction)
+    // ==========================================
+
     fun createInvoice(invoice: Invoice): Invoice {
-        _invoices.value = listOf(invoice) + _invoices.value
+        runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                // 1. Insert invoice header and line items
+                database.invoiceDao().insertInvoice(invoice.toEntity())
+                database.invoiceDao().insertItems(invoice.items.map { it.toEntity(invoice.id) })
 
-        // If items are in inventory, reduce stock
-        invoice.items.forEach { line ->
-            val matching = _inventory.value.find { it.name.equals(line.name, ignoreCase = true) }
-            if (matching != null) {
-                updateInventoryStock(matching.id, -line.quantity)
+                // 2. Reduce stock if items are in inventory
+                val currentInventory = database.inventoryDao().getAllList()
+                invoice.items.forEach { line ->
+                    val matching = currentInventory.find { it.name.equals(line.name, ignoreCase = true) }
+                    if (matching != null) {
+                        val newStock = (matching.stock - line.quantity).coerceAtLeast(0)
+                        database.inventoryDao().update(matching.copy(stock = newStock))
+                    }
+                }
+
+                // 3. Payment handling: CASH/UPI posts ONE Cash IN; CREDIT posts to khata
+                if (invoice.paymentMode == "CASH" || invoice.paymentMode == "UPI") {
+                    database.cashbookDao().insert(
+                        CashEntryEntity(
+                            type = "IN",
+                            amount = invoice.totalAmount,
+                            category = "Sales",
+                            remark = "Bill #${invoice.billNumber} (${if (invoice.customerName.isNotBlank()) invoice.customerName else "Cash Customer"})",
+                            paymentMode = invoice.paymentMode,
+                            linkedId = invoice.id,
+                            source = "invoice"
+                        )
+                    )
+                } else if (invoice.paymentMode == "CREDIT" && invoice.customerName.isNotBlank()) {
+                    var customer = database.customerDao().getAllList().find { it.name.equals(invoice.customerName, ignoreCase = true) }
+                    if (customer == null) {
+                        customer = CustomerEntity(
+                            name = invoice.customerName.trim(),
+                            phone = invoice.customerPhone.trim()
+                        )
+                        database.customerDao().insert(customer)
+                    }
+                    database.transactionDao().insert(
+                        TransactionEntity(
+                            customerId = customer.id,
+                            amount = invoice.totalAmount,
+                            type = "GAVE",
+                            note = "Bill #${invoice.billNumber}",
+                            billNumber = invoice.billNumber
+                        )
+                    )
+                }
             }
+            _invoices.value = database.invoiceDao().getAllWithItemsList().map { it.toDomain() }
+            _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            _customers.value = database.customerDao().getAllList().map { it.toDomain() }
         }
-
-        // paymentMode CASH or UPI posts ONE Cash IN for invoice total (source = "invoice", linkedId = invoice.id)
-        if (invoice.paymentMode == "CASH" || invoice.paymentMode == "UPI") {
-            addCashEntry(
-                type = "IN",
-                amount = invoice.totalAmount,
-                category = "Sales",
-                remark = "Bill #${invoice.billNumber} (${if (invoice.customerName.isNotBlank()) invoice.customerName else "Cash Customer"})",
-                paymentMode = invoice.paymentMode,
-                linkedId = invoice.id,
-                source = "invoice"
-            )
-        } else if (invoice.paymentMode == "CREDIT" && invoice.customerName.isNotBlank()) {
-            // CREDIT posts nothing to the cashbook and creates the udhar (GAVE) entry only
-            var customer = _customers.value.find { it.name.equals(invoice.customerName, ignoreCase = true) }
-            if (customer == null) {
-                customer = addCustomer(invoice.customerName, invoice.customerPhone)
-            }
-            addTransaction(
-                customerId = customer.id,
-                amount = invoice.totalAmount,
-                type = "GAVE",
-                note = "Bill #${invoice.billNumber}",
-                billNumber = invoice.billNumber
-            )
-        }
-
-        saveData()
         return invoice
     }
 
     fun deleteInvoice(invoiceId: String) {
-        val invoice = _invoices.value.find { it.id == invoiceId } ?: return
+        runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                val invWithItems = database.invoiceDao().getWithItemsById(invoiceId) ?: return@withTransaction
+                val invoice = invWithItems.invoice
+                val items = invWithItems.items
 
-        // 1. Restore inventory stock
-        invoice.items.forEach { line ->
-            val matching = _inventory.value.find { it.name.equals(line.name, ignoreCase = true) }
-            if (matching != null) {
-                updateInventoryStock(matching.id, line.quantity)
+                // 1. Restore stock
+                val currentInventory = database.inventoryDao().getAllList()
+                items.forEach { line ->
+                    val matching = currentInventory.find { it.name.equals(line.name, ignoreCase = true) }
+                    if (matching != null) {
+                        database.inventoryDao().update(matching.copy(stock = matching.stock + line.quantity))
+                    }
+                }
+
+                // 2. Remove linked cashbook entries
+                database.cashbookDao().deleteByLinkedId(invoice.id)
+
+                // 3. Remove linked credit transaction if created
+                if (invoice.billNumber.isNotBlank()) {
+                    val txs = database.transactionDao().getByBillNumber(invoice.billNumber)
+                    val txIds = txs.map { it.id }
+                    if (txIds.isNotEmpty()) {
+                        database.cashbookDao().deleteByLinkedIds(txIds)
+                    }
+                    database.transactionDao().deleteByBillNumber(invoice.billNumber)
+                }
+
+                // 4. Delete items and invoice
+                database.invoiceDao().deleteItemsByInvoiceId(invoiceId)
+                database.invoiceDao().deleteById(invoiceId)
             }
+            _invoices.value = database.invoiceDao().getAllWithItemsList().map { it.toDomain() }
+            _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
         }
-
-        // 2. Remove linked cashbook entries
-        _cashbook.value = _cashbook.value.filter { it.linkedId != invoice.id }
-
-        // 3. Remove linked credit transaction if created
-        if (invoice.billNumber.isNotBlank()) {
-            val txsToRemove = _transactions.value.filter { it.billNumber == invoice.billNumber }
-            val txIds = txsToRemove.map { it.id }.toSet()
-            _transactions.value = _transactions.value.filter { it.billNumber != invoice.billNumber }
-            _cashbook.value = _cashbook.value.filter { it.linkedId !in txIds }
-        }
-
-        // 4. Remove invoice
-        _invoices.value = _invoices.value.filter { it.id != invoiceId }
-        saveData()
     }
 
-    // Cashbook operations
+    // ==========================================
+    // CASHBOOK OPERATIONS
+    // ==========================================
+
     fun addCashEntry(
         type: String, // "IN" or "OUT"
         amount: Double,
@@ -420,7 +756,7 @@ class AppRepository(context: Context) {
         linkedId: String? = null,
         source: String = "manual"
     ): CashEntry {
-        val entry = CashEntry(
+        val entry = CashEntryEntity(
             type = type,
             amount = amount,
             category = category,
@@ -429,32 +765,37 @@ class AppRepository(context: Context) {
             linkedId = linkedId,
             source = source
         )
-        _cashbook.value = listOf(entry) + _cashbook.value
-        saveData()
-        return entry
+        runBlocking(Dispatchers.IO) {
+            database.cashbookDao().insert(entry)
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+        }
+        return entry.toDomain()
     }
 
     fun deleteCashEntry(id: String) {
-        _cashbook.value = _cashbook.value.filter { it.id != id }
-        saveData()
+        runBlocking(Dispatchers.IO) {
+            database.cashbookDao().deleteById(id)
+            _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+        }
     }
 
-    // Real CSV Customer Import (columns: name, phone, balance; positive balance = customer owes shop)
+    // ==========================================
+    // CSV IMPORT
+    // ==========================================
+
     fun previewCustomersFromCsv(csvText: String): List<CsvCustomerPreview> {
-        val lines = csvText.lines().map { it.trim() }.filter { it.isNotBlank() }
-        if (lines.isEmpty()) return emptyList()
-
-        val existing = _customers.value
+        val lines = csvText.lines()
         val result = mutableListOf<CsvCustomerPreview>()
+        val existing = customers.value
 
-        val firstLineLower = lines[0].lowercase()
-        val startIndex = if (firstLineLower.contains("name") || firstLineLower.contains("phone") || firstLineLower.contains("balance")) 1 else 0
-
-        for (i in startIndex until lines.size) {
-            val parts = lines[i].split(",").map { it.trim().removeSurrounding("\"") }
-            if (parts.isEmpty()) continue
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.isBlank()) continue
+            val parts = trimmed.split(",").map { it.trim().trim('"', '\'') }
             val rawName = parts.getOrNull(0) ?: ""
-            if (rawName.isBlank()) continue
+            if (rawName.isBlank() || rawName.equals("name", ignoreCase = true) || rawName.equals("customer name", ignoreCase = true)) {
+                continue
+            }
 
             val rawPhone = parts.getOrNull(1) ?: ""
             val rawBalanceStr = parts.getOrNull(2) ?: "0"
@@ -484,22 +825,33 @@ class AppRepository(context: Context) {
 
     fun importCustomersFromCsv(previews: List<CsvCustomerPreview>): Int {
         val nonDuplicates = previews.filter { !it.isDuplicate }
-        var importedCount = 0
-
-        for (item in nonDuplicates) {
-            val cust = addCustomer(name = item.name, phone = item.phone)
-            if (Math.abs(item.balance) > 0.009) {
-                addTransaction(
-                    customerId = cust.id,
-                    amount = Math.abs(item.balance),
-                    type = if (item.balance > 0) "GAVE" else "GOT",
-                    note = "Opening Balance (CSV Import)"
-                )
+        return runBlocking(Dispatchers.IO) {
+            val count = database.withTransaction {
+                var importedCount = 0
+                for (item in nonDuplicates) {
+                    val newCust = CustomerEntity(
+                        name = item.name.trim(),
+                        phone = item.phone.trim()
+                    )
+                    database.customerDao().insert(newCust)
+                    if (Math.abs(item.balance) > 0.009) {
+                        database.transactionDao().insert(
+                            TransactionEntity(
+                                customerId = newCust.id,
+                                amount = Math.abs(item.balance),
+                                type = if (item.balance > 0) "GAVE" else "GOT",
+                                note = "Opening Balance (CSV Import)"
+                            )
+                        )
+                    }
+                    importedCount++
+                }
+                importedCount
             }
-            importedCount++
+            _customers.value = database.customerDao().getAllList().map { it.toDomain() }
+            _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+            count
         }
-        saveData()
-        return importedCount
     }
 
     fun importCustomersFromCsv(csvText: String): Pair<Int, Int> {
@@ -509,21 +861,32 @@ class AppRepository(context: Context) {
     }
 
     fun clearAllData() {
-        _customers.value = emptyList()
-        _transactions.value = emptyList()
-        _inventory.value = emptyList()
-        _invoices.value = emptyList()
-        _cashbook.value = emptyList()
-        saveData()
+        runBlocking(Dispatchers.IO) {
+            database.withTransaction {
+                database.customerDao().deleteAll()
+                database.transactionDao().deleteAll()
+                database.inventoryDao().deleteAll()
+                database.invoiceDao().deleteAll()
+                database.cashbookDao().deleteAll()
+            }
+            _customers.value = emptyList()
+            _transactions.value = emptyList()
+            _inventory.value = emptyList()
+            _invoices.value = emptyList()
+            _cashbook.value = emptyList()
+        }
     }
 
-    private fun saveData() {
-        try {
+    // ==========================================
+    // BACKUP & RESTORE (ROOM BACKED)
+    // ==========================================
+
+    fun exportDataAsJsonString(): String {
+        return runBlocking(Dispatchers.IO) {
             val json = JSONObject()
 
-            // Customers
             val custArr = JSONArray()
-            _customers.value.forEach { c ->
+            database.customerDao().getAllList().forEach { c ->
                 val o = JSONObject()
                 o.put("id", c.id)
                 o.put("name", c.name)
@@ -535,9 +898,8 @@ class AppRepository(context: Context) {
             }
             json.put("customers", custArr)
 
-            // Transactions
             val txArr = JSONArray()
-            _transactions.value.forEach { t ->
+            database.transactionDao().getAllList().forEach { t ->
                 val o = JSONObject()
                 o.put("id", t.id)
                 o.put("customerId", t.customerId)
@@ -551,9 +913,8 @@ class AppRepository(context: Context) {
             }
             json.put("transactions", txArr)
 
-            // Inventory
             val invArr = JSONArray()
-            _inventory.value.forEach { item ->
+            database.inventoryDao().getAllList().forEach { item ->
                 val o = JSONObject()
                 o.put("id", item.id)
                 o.put("name", item.name)
@@ -568,9 +929,9 @@ class AppRepository(context: Context) {
             }
             json.put("inventory", invArr)
 
-            // Invoices
             val invsArr = JSONArray()
-            _invoices.value.forEach { inv ->
+            database.invoiceDao().getAllWithItemsList().forEach { invWithItems ->
+                val inv = invWithItems.invoice
                 val o = JSONObject()
                 o.put("id", inv.id)
                 o.put("billNumber", inv.billNumber)
@@ -589,7 +950,7 @@ class AppRepository(context: Context) {
                 o.put("themeName", inv.themeName)
 
                 val itemsArr = JSONArray()
-                inv.items.forEach { line ->
+                invWithItems.items.forEach { line ->
                     val io = JSONObject()
                     io.put("id", line.id)
                     io.put("name", line.name)
@@ -604,179 +965,24 @@ class AppRepository(context: Context) {
             }
             json.put("invoices", invsArr)
 
-            // Cashbook
             val cashArr = JSONArray()
-            _cashbook.value.forEach { c ->
+            database.cashbookDao().getAllList().forEach { ce ->
                 val o = JSONObject()
-                o.put("id", c.id)
-                o.put("type", c.type)
-                o.put("amount", c.amount)
-                o.put("category", c.category)
-                o.put("remark", c.remark)
-                o.put("date", c.date)
-                o.put("paymentMode", c.paymentMode)
-                if (c.linkedId != null) o.put("linkedId", c.linkedId)
-                o.put("source", c.source)
+                o.put("id", ce.id)
+                o.put("type", ce.type)
+                o.put("amount", ce.amount)
+                o.put("category", ce.category)
+                o.put("remark", ce.remark)
+                o.put("date", ce.date)
+                o.put("paymentMode", ce.paymentMode)
+                o.put("linkedId", ce.linkedId)
+                o.put("source", ce.source)
                 cashArr.put(o)
             }
             json.put("cashbook", cashArr)
 
-            // Critical write: use commit() rather than apply()
-            prefs.edit().putString("app_saved_data", json.toString()).commit()
-        } catch (e: Exception) {
-            Log.e("AppRepository", "Failed to save data: ${e.message}", e)
+            json.toString(2)
         }
-    }
-
-    private fun loadFromStorage() {
-        val saved = prefs.getString("app_saved_data", null) ?: return
-        try {
-            val json = JSONObject(saved)
-
-            // Parse into temporary lists first
-            val tempCustomers = mutableListOf<Customer>()
-            val tempTransactions = mutableListOf<Transaction>()
-            val tempInventory = mutableListOf<InventoryItem>()
-            val tempInvoices = mutableListOf<Invoice>()
-            val tempCashbook = mutableListOf<CashEntry>()
-
-            if (json.has("customers")) {
-                val arr = json.getJSONArray("customers")
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    tempCustomers.add(Customer(
-                        id = o.optString("id", UUID.randomUUID().toString()),
-                        name = o.optString("name", ""),
-                        phone = o.optString("phone", ""),
-                        address = o.optString("address", ""),
-                        gstin = o.optString("gstin", ""),
-                        createdAt = o.optLong("createdAt", System.currentTimeMillis())
-                    ))
-                }
-            }
-
-            if (json.has("transactions")) {
-                val arr = json.getJSONArray("transactions")
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    tempTransactions.add(Transaction(
-                        id = o.optString("id", UUID.randomUUID().toString()),
-                        customerId = o.optString("customerId", ""),
-                        amount = o.optDouble("amount", 0.0),
-                        type = o.optString("type", "GAVE"),
-                        note = o.optString("note", ""),
-                        date = o.optLong("date", System.currentTimeMillis()),
-                        isCancelled = o.optBoolean("isCancelled", false),
-                        billNumber = o.optString("billNumber", "")
-                    ))
-                }
-            }
-
-            if (json.has("inventory")) {
-                val arr = json.getJSONArray("inventory")
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val sizesArr = o.optJSONArray("sizes")
-                    val sizes = mutableListOf<String>()
-                    if (sizesArr != null) {
-                        for (s in 0 until sizesArr.length()) {
-                            sizes.add(sizesArr.getString(s))
-                        }
-                    }
-                    tempInventory.add(InventoryItem(
-                        id = o.optString("id", UUID.randomUUID().toString()),
-                        name = o.optString("name", ""),
-                        itemCode = o.optString("itemCode", ""),
-                        salePrice = o.optDouble("salePrice", 0.0),
-                        purchasePrice = o.optDouble("purchasePrice", 0.0),
-                        stock = o.optInt("stock", 0),
-                        category = o.optString("category", "General"),
-                        sizes = sizes,
-                        gstPercent = o.optDouble("gstPercent", 0.0)
-                    ))
-                }
-            }
-
-            if (json.has("invoices")) {
-                val arr = json.getJSONArray("invoices")
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val itemsArr = o.optJSONArray("items")
-                    val itemsList = mutableListOf<InvoiceItem>()
-                    if (itemsArr != null) {
-                        for (j in 0 until itemsArr.length()) {
-                            val io = itemsArr.getJSONObject(j)
-                            itemsList.add(InvoiceItem(
-                                id = io.optString("id", UUID.randomUUID().toString()),
-                                name = io.optString("name", ""),
-                                quantity = io.optInt("quantity", 1),
-                                unitPrice = io.optDouble("unitPrice", 0.0),
-                                gstPercent = io.optDouble("gstPercent", 0.0),
-                                total = io.optDouble("total", 0.0)
-                            ))
-                        }
-                    }
-                    tempInvoices.add(Invoice(
-                        id = o.optString("id", UUID.randomUUID().toString()),
-                        billNumber = o.optString("billNumber", ""),
-                        date = o.optLong("date", System.currentTimeMillis()),
-                        customerName = o.optString("customerName", ""),
-                        customerPhone = o.optString("customerPhone", ""),
-                        items = itemsList,
-                        subtotal = o.optDouble("subtotal", 0.0),
-                        gstAmount = o.optDouble("gstAmount", 0.0),
-                        discount = o.optDouble("discount", 0.0),
-                        additionalCharges = o.optDouble("additionalCharges", 0.0),
-                        totalAmount = o.optDouble("totalAmount", 0.0),
-                        paymentMode = o.optString("paymentMode", "CASH"),
-                        stateOfSupply = o.optString("stateOfSupply", "Gujarat"),
-                        gstin = o.optString("gstin", ""),
-                        notes = o.optString("notes", ""),
-                        themeName = o.optString("themeName", "PREMIUM_BLUE")
-                    ))
-                }
-            }
-
-            if (json.has("cashbook")) {
-                val arr = json.getJSONArray("cashbook")
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    tempCashbook.add(CashEntry(
-                        id = o.optString("id", UUID.randomUUID().toString()),
-                        type = o.optString("type", "IN"),
-                        amount = o.optDouble("amount", 0.0),
-                        category = o.optString("category", ""),
-                        remark = o.optString("remark", ""),
-                        date = o.optLong("date", System.currentTimeMillis()),
-                        paymentMode = o.optString("paymentMode", "CASH"),
-                        linkedId = if (o.has("linkedId") && !o.isNull("linkedId")) o.getString("linkedId") else null,
-                        source = o.optString("source", "manual")
-                    ))
-                }
-            }
-
-            // Assign to state only if parsing completes successfully
-            _customers.value = tempCustomers
-            _transactions.value = tempTransactions
-            _inventory.value = tempInventory
-            _invoices.value = tempInvoices
-            _cashbook.value = tempCashbook
-            _corruptDataBanner.value = null
-        } catch (e: Exception) {
-            Log.e("AppRepository", "Error parsing saved data: ${e.message}", e)
-            val timestamp = System.currentTimeMillis()
-            prefs.edit().putString("app_saved_data_corrupt_$timestamp", saved).commit()
-            _corruptDataBanner.value = "Data parsing error detected. Corrupt data backed up safely."
-            // Do NOT call saveData() to prevent overwriting
-        }
-    }
-
-    // ==========================================
-    // HONEST PLAIN-JSON BACKUP & RESTORE
-    // ==========================================
-
-    fun exportDataAsJsonString(): String {
-        return prefs.getString("app_saved_data", "{}") ?: "{}"
     }
 
     fun validateBackupJson(jsonStr: String): ImportResult {
@@ -866,16 +1072,157 @@ class AppRepository(context: Context) {
         }
 
         return try {
-            // Before replacing, save the current data under "app_saved_data_prev"
-            val currentRaw = prefs.getString("app_saved_data", "{}") ?: "{}"
+            val currentRaw = exportDataAsJsonString()
             prefs.edit().putString("app_saved_data_prev", currentRaw).commit()
 
-            // Save the validated new data
-            prefs.edit().putString("app_saved_data", jsonStr).commit()
-            loadFromStorage()
+            val json = JSONObject(jsonStr)
+            val newCustomers = mutableListOf<CustomerEntity>()
+            val newTransactions = mutableListOf<TransactionEntity>()
+            val newInventory = mutableListOf<InventoryItemEntity>()
+            val newInvoices = mutableListOf<InvoiceEntity>()
+            val newInvoiceItems = mutableListOf<InvoiceItemEntity>()
+            val newCashbook = mutableListOf<CashEntryEntity>()
+
+            if (json.has("customers")) {
+                val arr = json.getJSONArray("customers")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    newCustomers.add(CustomerEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        name = o.optString("name", ""),
+                        phone = o.optString("phone", ""),
+                        address = o.optString("address", ""),
+                        gstin = o.optString("gstin", ""),
+                        createdAt = o.optLong("createdAt", System.currentTimeMillis())
+                    ))
+                }
+            }
+
+            if (json.has("transactions")) {
+                val arr = json.getJSONArray("transactions")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    newTransactions.add(TransactionEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        customerId = o.optString("customerId", ""),
+                        amount = o.optDouble("amount", 0.0),
+                        type = o.optString("type", "GAVE"),
+                        note = o.optString("note", ""),
+                        date = o.optLong("date", System.currentTimeMillis()),
+                        isCancelled = o.optBoolean("isCancelled", false),
+                        billNumber = o.optString("billNumber", "")
+                    ))
+                }
+            }
+
+            if (json.has("inventory")) {
+                val arr = json.getJSONArray("inventory")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val sizesArr = o.optJSONArray("sizes")
+                    val sizes = mutableListOf<String>()
+                    if (sizesArr != null) {
+                        for (j in 0 until sizesArr.length()) {
+                            sizes.add(sizesArr.getString(j))
+                        }
+                    }
+                    newInventory.add(InventoryItemEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        name = o.optString("name", ""),
+                        itemCode = o.optString("itemCode", ""),
+                        salePrice = o.optDouble("salePrice", 0.0),
+                        purchasePrice = o.optDouble("purchasePrice", 0.0),
+                        stock = o.optInt("stock", 0),
+                        category = o.optString("category", "General"),
+                        sizes = sizes,
+                        gstPercent = o.optDouble("gstPercent", 0.0)
+                    ))
+                }
+            }
+
+            if (json.has("invoices")) {
+                val arr = json.getJSONArray("invoices")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val invId = o.optString("id", UUID.randomUUID().toString())
+                    newInvoices.add(InvoiceEntity(
+                        id = invId,
+                        billNumber = o.optString("billNumber", ""),
+                        date = o.optLong("date", System.currentTimeMillis()),
+                        customerName = o.optString("customerName", ""),
+                        customerPhone = o.optString("customerPhone", ""),
+                        subtotal = o.optDouble("subtotal", 0.0),
+                        gstAmount = o.optDouble("gstAmount", 0.0),
+                        discount = o.optDouble("discount", 0.0),
+                        additionalCharges = o.optDouble("additionalCharges", 0.0),
+                        totalAmount = o.optDouble("totalAmount", 0.0),
+                        paymentMode = o.optString("paymentMode", "CASH"),
+                        stateOfSupply = o.optString("stateOfSupply", "Gujarat"),
+                        gstin = o.optString("gstin", ""),
+                        notes = o.optString("notes", ""),
+                        themeName = o.optString("themeName", "PREMIUM_BLUE")
+                    ))
+
+                    val itemsArr = o.optJSONArray("items")
+                    if (itemsArr != null) {
+                        for (j in 0 until itemsArr.length()) {
+                            val io = itemsArr.getJSONObject(j)
+                            newInvoiceItems.add(InvoiceItemEntity(
+                                id = io.optString("id", UUID.randomUUID().toString()),
+                                invoiceId = invId,
+                                name = io.optString("name", ""),
+                                quantity = io.optInt("quantity", 1),
+                                unitPrice = io.optDouble("unitPrice", 0.0),
+                                gstPercent = io.optDouble("gstPercent", 0.0),
+                                total = io.optDouble("total", 0.0)
+                            ))
+                        }
+                    }
+                }
+            }
+
+            if (json.has("cashbook")) {
+                val arr = json.getJSONArray("cashbook")
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    newCashbook.add(CashEntryEntity(
+                        id = o.optString("id", UUID.randomUUID().toString()),
+                        type = o.optString("type", "IN"),
+                        amount = o.optDouble("amount", 0.0),
+                        category = o.optString("category", ""),
+                        remark = o.optString("remark", ""),
+                        date = o.optLong("date", System.currentTimeMillis()),
+                        paymentMode = o.optString("paymentMode", "CASH"),
+                        linkedId = if (o.has("linkedId") && !o.isNull("linkedId")) o.getString("linkedId") else null,
+                        source = o.optString("source", "manual")
+                    ))
+                }
+            }
+
+            runBlocking(Dispatchers.IO) {
+                database.withTransaction {
+                    database.customerDao().deleteAll()
+                    database.transactionDao().deleteAll()
+                    database.inventoryDao().deleteAll()
+                    database.invoiceDao().deleteAll()
+                    database.cashbookDao().deleteAll()
+
+                    database.customerDao().insertAll(newCustomers)
+                    database.transactionDao().insertAll(newTransactions)
+                    database.inventoryDao().insertAll(newInventory)
+                    database.invoiceDao().insertInvoices(newInvoices)
+                    database.invoiceDao().insertItems(newInvoiceItems)
+                    database.cashbookDao().insertAll(newCashbook)
+                }
+                _customers.value = database.customerDao().getAllList().map { it.toDomain() }
+                _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
+                _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
+                _invoices.value = database.invoiceDao().getAllWithItemsList().map { it.toDomain() }
+                _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
+            }
             validation
         } catch (e: Exception) {
-            Log.e("AppRepository", "Error applying backup: ${e.message}", e)
+            Log.e("AppRepository", "Error applying backup to Room: ${e.message}", e)
             ImportResult(success = false, errorMessage = "Error applying backup: ${e.localizedMessage}")
         }
     }
@@ -904,7 +1251,7 @@ class AppRepository(context: Context) {
     }
 
     // ==========================================
-    // 3. EXCEL / CSV SPREADSHEET EXPORTS
+    // EXCEL / CSV SPREADSHEET EXPORTS
     // ==========================================
 
     private fun escapeCsv(value: Any?): String {
@@ -916,10 +1263,6 @@ class AppRepository(context: Context) {
         }
     }
 
-    /**
-     * Export Khata Ledger (CSV/Excel-compatible)
-     * Columns: Customer Name, Phone, Net Balance, Last Transaction Date
-     */
     fun exportKhataLedgerCsv(context: Context): File {
         val reportsDir = File(context.cacheDir, "reports").apply { mkdirs() }
         val dateStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
@@ -928,8 +1271,8 @@ class AppRepository(context: Context) {
         val sb = StringBuilder()
         sb.append("Customer Name,Phone,Net Balance,Last Transaction Date\n")
 
-        _customers.value.forEach { customer ->
-            val custTxns = _transactions.value.filter { it.customerId == customer.id && !it.isCancelled }
+        customers.value.forEach { customer ->
+            val custTxns = transactions.value.filter { it.customerId == customer.id && !it.isCancelled }
             val totalGave = custTxns.filter { it.type == "GAVE" }.sumOf { it.amount }
             val totalGot = custTxns.filter { it.type == "GOT" }.sumOf { it.amount }
             val netBalance = totalGave - totalGot
@@ -946,10 +1289,6 @@ class AppRepository(context: Context) {
         return file
     }
 
-    /**
-     * Export Sales Report (CSV/Excel-compatible)
-     * Columns: Bill No, Date, Customer Name, Subtotal, GST, Discount, Total Amount, Payment Mode
-     */
     fun exportSalesReportCsv(context: Context): File {
         val reportsDir = File(context.cacheDir, "reports").apply { mkdirs() }
         val dateStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
@@ -958,7 +1297,7 @@ class AppRepository(context: Context) {
         val sb = StringBuilder()
         sb.append("Bill No,Date,Customer Name,Subtotal,GST,Discount,Total Amount,Payment Mode\n")
 
-        _invoices.value.forEach { invoice ->
+        invoices.value.forEach { invoice ->
             val dateFormatted = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date(invoice.date))
             sb.append(escapeCsv(invoice.billNumber)).append(",")
             sb.append(escapeCsv(dateFormatted)).append(",")
@@ -974,10 +1313,6 @@ class AppRepository(context: Context) {
         return file
     }
 
-    /**
-     * Export Inventory Stock (CSV/Excel-compatible)
-     * Columns: Item Code, Item Name, Category, Stock Quantity, Purchase Price, Sale Price
-     */
     fun exportInventoryCsv(context: Context): File {
         val reportsDir = File(context.cacheDir, "reports").apply { mkdirs() }
         val dateStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
@@ -986,7 +1321,7 @@ class AppRepository(context: Context) {
         val sb = StringBuilder()
         sb.append("Item Code,Item Name,Category,Stock Quantity,Purchase Price,Sale Price\n")
 
-        _inventory.value.forEach { item ->
+        inventory.value.forEach { item ->
             sb.append(escapeCsv(item.itemCode)).append(",")
             sb.append(escapeCsv(item.name)).append(",")
             sb.append(escapeCsv(item.category)).append(",")

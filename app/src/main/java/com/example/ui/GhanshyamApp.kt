@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,11 +34,14 @@ fun GhanshyamApp(
     val currentLanguage by repository.language.collectAsState()
     val storeProfile by repository.storeProfile.collectAsState()
 
-    var showAiModal by remember { mutableStateOf(false) }
-    var showLanguageMenu by remember { mutableStateOf(false) }
-    var currentTab by remember { mutableStateOf(0) } // 0: Khata, 1: Billing, 2: Stock, 3: Cashbook, 4: Shop
-    var selectedCustomer by remember { mutableStateOf<Customer?>(null) }
-    var showGuideModal by remember { mutableStateOf(false) }
+    var showAiModal by rememberSaveable { mutableStateOf(false) }
+    var showLanguageMenu by rememberSaveable { mutableStateOf(false) }
+    var currentTab by rememberSaveable { mutableStateOf(0) } // 0: Khata, 1: Billing, 2: Stock, 3: Cashbook, 4: Shop
+    var selectedCustomerId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showGuideModal by rememberSaveable { mutableStateOf(false) }
+
+    val customers by repository.customers.collectAsState()
+    val selectedCustomer = customers.find { it.id == selectedCustomerId }
 
     // If onboarding is not completed yet, show OnboardingScreen!
     if (!hasCompletedOnboarding || showGuideModal) {
@@ -54,11 +58,11 @@ fun GhanshyamApp(
 
     // Detail Screen BackHandler
     if (selectedCustomer != null) {
-        BackHandler { selectedCustomer = null }
+        BackHandler { selectedCustomerId = null }
         CustomerDetailScreen(
-            customer = selectedCustomer!!,
+            customer = selectedCustomer,
             repository = repository,
-            onBack = { selectedCustomer = null }
+            onBack = { selectedCustomerId = null }
         )
         return
     }
@@ -266,7 +270,7 @@ fun GhanshyamApp(
                 when (currentTab) {
                     0 -> KhataScreen(
                         repository = repository,
-                        onCustomerClick = { selectedCustomer = it }
+                        onCustomerClick = { selectedCustomerId = it.id }
                     )
                     1 -> BillingScreen(repository = repository)
                     2 -> StockScreen(repository = repository)

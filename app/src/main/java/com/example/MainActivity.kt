@@ -13,12 +13,11 @@ import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var repository: AppRepository
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        repository = AppRepository(applicationContext)
+        val app = application as GhanshyamApplication
+        val repository = app.repository
 
         setContent {
             MyApplicationTheme {
