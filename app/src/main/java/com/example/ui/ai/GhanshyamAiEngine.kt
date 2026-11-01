@@ -202,8 +202,8 @@ class GhanshyamAiEngine(
         val isUdhar = lower.contains("udhar") || lower.contains("diya") || lower.contains("gave")
         val type = if (isUdhar) "GAVE" else "GOT"
 
-        // Find customer name from existing or extract
-        var customerName = "Rajesh Sharma"
+        // Find customer name from existing or extract from query
+        var customerName = ""
         val existing = repository.customers.value
         for (c in existing) {
             if (lower.contains(c.name.lowercase())) {
@@ -211,16 +211,31 @@ class GhanshyamAiEngine(
                 break
             }
         }
+        if (customerName.isBlank()) {
+            val words = query.split(" ").filter { word ->
+                val w = word.lowercase()
+                w !in listOf("udhar", "diya", "gave", "mila", "jama", "got", "ko", "se", "ka", "ki", "ke", "likho", "jodo", "record", "rupay", "rs", "inr") &&
+                word.none { it.isDigit() }
+            }
+            customerName = words.take(2).joinToString(" ").trim()
+            if (customerName.isBlank()) customerName = "Customer"
+        }
 
         val typeText = if (isUdhar) "Udhar (Aapne Diye)" else "Jama (Aapko Mile)"
+        val existingCust = repository.customers.value.find { it.name.equals(customerName, ignoreCase = true) }
+        val promptPhone = existingCust == null || existingCust.phone.isBlank()
 
         return AiResponse.Success(
-            replyText = "$customerName ke khate me ₹$amount $typeText record karne ke liye ready hai.",
+            replyText = if (promptPhone) {
+                "$customerName ke khate me ₹$amount $typeText record karne ke liye ready hai. Kripya customer ka phone number jodein."
+            } else {
+                "$customerName ke khate me ₹$amount $typeText record karne ke liye ready hai."
+            },
             actionTitle = "Record $typeText: ₹$amount for $customerName",
             executeAction = {
                 var cust = repository.customers.value.find { it.name.equals(customerName, ignoreCase = true) }
                 if (cust == null) {
-                    cust = repository.addCustomer(customerName, "+91 98000 00000")
+                    cust = repository.addCustomer(customerName, "")
                 }
                 repository.addTransaction(
                     customerId = cust.id,
@@ -234,7 +249,7 @@ class GhanshyamAiEngine(
 
     private fun handleAddCustomerCommand(query: String): AiResponse {
         val numbers = query.filter { it.isDigit() }
-        val phone = if (numbers.length >= 10) numbers.takeLast(10) else "+91 98765 43210"
+        val phone = if (numbers.length >= 10) numbers.takeLast(10) else ""
 
         // Clean customer name
         var name = query
@@ -242,10 +257,16 @@ class GhanshyamAiEngine(
             .replace(numbers, "")
             .trim()
 
-        if (name.isBlank()) name = "New Customer"
+        if (name.isBlank()) name = "Customer"
+
+        val reply = if (phone.isNotBlank()) {
+            "Naye customer '$name' (Phone: $phone) ko Khata me jod diya gaya hai."
+        } else {
+            "Naye customer '$name' ko Khata me jod diya gaya hai. Kripya phone number add karein."
+        }
 
         return AiResponse.Success(
-            replyText = "Naye customer '$name' (Phone: $phone) ko Khata me jod diya gaya hai.",
+            replyText = reply,
             actionTitle = "Add Customer: $name",
             executeAction = {
                 repository.addCustomer(name, phone)
@@ -327,8 +348,8 @@ class GhanshyamAiEngine(
         }
 
         if (lower.contains("address") || lower.contains("pata")) {
-            newAddress = query.replace(Regex("(?i).*address|pata"), "").trim()
-            if (newAddress.isBlank()) newAddress = "Shop #4, Commercial Hub"
+            val extracted = query.replace(Regex("(?i).*address|pata"), "").trim()
+            if (extracted.isNotBlank()) newAddress = extracted
         }
 
         return AiResponse.Success(
@@ -341,7 +362,8 @@ class GhanshyamAiEngine(
                     current.phone,
                     newUpi,
                     current.gstin,
-                    current.ownerName
+                    current.ownerName,
+                    current.state
                 )
             }
         )

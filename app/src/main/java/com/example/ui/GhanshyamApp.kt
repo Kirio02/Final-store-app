@@ -39,9 +39,11 @@ fun GhanshyamApp(
     var selectedCustomer by remember { mutableStateOf<Customer?>(null) }
     var showGuideModal by remember { mutableStateOf(false) }
 
-    // If onboarding guide is not completed yet, show OnboardingScreen!
+    // If onboarding is not completed yet, show OnboardingScreen!
     if (!hasCompletedOnboarding || showGuideModal) {
         OnboardingScreen(
+            repository = repository,
+            isTutorialMode = showGuideModal,
             onFinish = {
                 repository.completeOnboarding()
                 showGuideModal = false
@@ -79,7 +81,7 @@ fun GhanshyamApp(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = storeProfile.storeName,
+                                text = if (storeProfile.storeName.isNotBlank()) storeProfile.storeName else "Ghanshyam Kids Wear",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
@@ -221,23 +223,59 @@ fun GhanshyamApp(
             }
         }
     ) { padding ->
-        Box(
+        val corruptBanner by repository.corruptDataBanner.collectAsState()
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            when (currentTab) {
-                0 -> KhataScreen(
-                    repository = repository,
-                    onCustomerClick = { selectedCustomer = it }
-                )
-                1 -> BillingScreen(repository = repository)
-                2 -> StockScreen(repository = repository)
-                3 -> CashbookScreen(repository = repository)
-                4 -> ShopProfileScreen(
-                    repository = repository,
-                    onOpenGuide = { showGuideModal = true }
-                )
+            if (corruptBanner != null) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    colors = CardDefaults.cardColors(containerColor = UdharRed.copy(alpha = 0.12f)),
+                    border = CardDefaults.outlinedCardBorder()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = LanguageStrings.get("corrupt_data_banner", currentLanguage),
+                            color = UdharRed,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { repository.startFreshAfterCorruption() },
+                                colors = ButtonDefaults.buttonColors(containerColor = UdharRed)
+                            ) {
+                                Text(LanguageStrings.get("btn_start_fresh", currentLanguage), fontSize = 12.sp)
+                            }
+                            OutlinedButton(
+                                onClick = { repository.dismissCorruptDataBanner() }
+                            ) {
+                                Text(LanguageStrings.get("btn_cancel", currentLanguage), fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (currentTab) {
+                    0 -> KhataScreen(
+                        repository = repository,
+                        onCustomerClick = { selectedCustomer = it }
+                    )
+                    1 -> BillingScreen(repository = repository)
+                    2 -> StockScreen(repository = repository)
+                    3 -> CashbookScreen(repository = repository)
+                    4 -> ShopProfileScreen(
+                        repository = repository,
+                        onOpenGuide = { showGuideModal = true }
+                    )
+                }
             }
         }
     }

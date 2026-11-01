@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,18 +19,26 @@ import androidx.compose.ui.unit.sp
 import com.example.data.AppRepository
 import com.example.model.CashEntry
 import com.example.ui.theme.*
+import com.example.ui.util.LanguageStrings
 import java.text.SimpleDateFormat
 import java.util.*
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CashbookScreen(
     repository: AppRepository
 ) {
     val entries by repository.cashbook.collectAsState()
 
-    val totalIn = entries.filter { it.type == "IN" }.sumOf { it.amount }
-    val totalOut = entries.filter { it.type == "OUT" }.sumOf { it.amount }
-    val netCash = totalIn - totalOut
+    val cashIn = entries.filter { it.paymentMode == "CASH" && it.type == "IN" }.sumOf { it.amount }
+    val cashOut = entries.filter { it.paymentMode == "CASH" && it.type == "OUT" }.sumOf { it.amount }
+    val netCash = cashIn - cashOut
+
+    val digitalIn = entries.filter { it.paymentMode != "CASH" && it.type == "IN" }.sumOf { it.amount }
+    val digitalOut = entries.filter { it.paymentMode != "CASH" && it.type == "OUT" }.sumOf { it.amount }
+    val netDigital = digitalIn - digitalOut
+
+    val netTotal = netCash + netDigital
 
     var showDialog by remember { mutableStateOf(false) }
     var dialogType by remember { mutableStateOf("IN") } // IN or OUT
@@ -86,36 +95,77 @@ fun CashbookScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Net Cash in Hand Card
+            // Net Total Balance & Separated Cash vs Digital Breakdown
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(16.dp),
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
                 border = CardDefaults.outlinedCardBorder()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("NET CASH IN HAND", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "₹${"%.2f".format(netCash)}",
+                        LanguageStrings.get("net_total_cash").uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "₹${"%.2f".format(netTotal)}",
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.Bold,
-                        color = if (netCash >= 0) PrimaryBlue else UdharRed
+                        color = if (netTotal >= 0) PrimaryBlue else UdharRed
                     )
 
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = JamaGreen, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Total In: ₹${"%.2f".format(totalIn)}", style = MaterialTheme.typography.bodyMedium, color = JamaGreen, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(14.dp))
+                    HorizontalDivider(color = CardBorder)
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 2-Column Split: Cash In Hand vs Digital (UPI/Bank)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Cash in Hand
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(SoftBackground)
+                                .padding(10.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Payments, contentDescription = null, tint = PrimaryBlue, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(LanguageStrings.get("cash_in_hand"), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = TextPrimary)
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("₹${"%.2f".format(netCash)}", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = if (netCash >= 0) JamaGreen else UdharRed)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("In: ₹${"%.2f".format(cashIn)}", style = MaterialTheme.typography.labelSmall, color = JamaGreen)
+                            Text("Out: ₹${"%.2f".format(cashOut)}", style = MaterialTheme.typography.labelSmall, color = UdharRed)
                         }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.ArrowUpward, contentDescription = null, tint = UdharRed, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Total Out: ₹${"%.2f".format(totalOut)}", style = MaterialTheme.typography.bodyMedium, color = UdharRed, fontWeight = FontWeight.SemiBold)
+
+                        // Digital (UPI/Bank)
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(SoftBackground)
+                                .padding(10.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.QrCodeScanner, contentDescription = null, tint = JamaGreen, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(LanguageStrings.get("digital_cash"), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = TextPrimary)
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("₹${"%.2f".format(netDigital)}", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = if (netDigital >= 0) JamaGreen else UdharRed)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("In: ₹${"%.2f".format(digitalIn)}", style = MaterialTheme.typography.labelSmall, color = JamaGreen)
+                            Text("Out: ₹${"%.2f".format(digitalOut)}", style = MaterialTheme.typography.labelSmall, color = UdharRed)
                         }
                     }
                 }
@@ -183,8 +233,27 @@ fun CashbookScreen(
                                     Spacer(modifier = Modifier.width(10.dp))
 
                                     Column {
-                                        Text(entry.category, fontWeight = FontWeight.Bold, color = TextPrimary, style = MaterialTheme.typography.bodyMedium)
-                                        Text(if (entry.remark.isNotBlank()) "${entry.remark} • $dateStr" else dateStr, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            Text(entry.category, fontWeight = FontWeight.Bold, color = TextPrimary, style = MaterialTheme.typography.bodyMedium)
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(4.dp))
+                                                    .background(if (entry.paymentMode == "CASH") PrimaryBlue.copy(alpha = 0.12f) else JamaGreen.copy(alpha = 0.12f))
+                                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                                            ) {
+                                                Text(
+                                                    entry.paymentMode,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (entry.paymentMode == "CASH") PrimaryBlue else JamaGreen
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            if (entry.remark.isNotBlank()) "${entry.remark} • $dateStr" else dateStr,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextSecondary
+                                        )
                                     }
                                 }
 
@@ -206,6 +275,7 @@ fun CashbookScreen(
         var amountText by remember { mutableStateOf("") }
         var categoryText by remember { mutableStateOf("") }
         var remarkText by remember { mutableStateOf("") }
+        var selectedMode by remember { mutableStateOf("CASH") }
 
         AlertDialog(
             onDismissRequest = { showDialog = false },
@@ -221,11 +291,27 @@ fun CashbookScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    Text(LanguageStrings.get("payment_mode_label"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("CASH", "UPI", "BANK", "CHEQUE").forEach { mode ->
+                            FilterChip(
+                                selected = selectedMode == mode,
+                                onClick = { selectedMode = mode },
+                                label = { Text(mode, fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
                     OutlinedTextField(
                         value = categoryText,
                         onValueChange = { categoryText = it },
                         label = { Text("Category") },
-                        placeholder = { Text(if (dialogType == "IN") "e.g. Sales, Advance" else "e.g. Chai Samosa, Transport") },
+                        placeholder = { Text(if (dialogType == "IN") "e.g. Counter Sales, Advance" else "e.g. Chai, Transport, Rent") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -248,7 +334,9 @@ fun CashbookScreen(
                                 type = dialogType,
                                 amount = amt,
                                 category = if (categoryText.isNotBlank()) categoryText else (if (dialogType == "IN") "Counter Cash" else "Shop Expense"),
-                                remark = remarkText
+                                remark = remarkText,
+                                paymentMode = selectedMode,
+                                source = "manual"
                             )
                             showDialog = false
                         }

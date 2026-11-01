@@ -52,7 +52,7 @@ fun BillingScreen(
     var additionalCharges by remember { mutableStateOf(0.0) }
     var discount by remember { mutableStateOf(0.0) }
     var customerGstin by remember { mutableStateOf("") }
-    var stateOfSupply by remember { mutableStateOf("Delhi") }
+    var stateOfSupply by remember(storeProfile.state) { mutableStateOf(storeProfile.state.ifBlank { "Gujarat" }) }
     var notes by remember { mutableStateOf("Thank you for your business!") }
 
     val subtotal = items.sumOf { it.quantity * it.unitPrice }
@@ -60,6 +60,7 @@ fun BillingScreen(
     val totalAmount = (subtotal + gstAmount + additionalCharges - discount).coerceAtLeast(0.0)
 
     var showSuccessDialog by remember { mutableStateOf(false) }
+    var invoiceToDelete by remember { mutableStateOf<Invoice?>(null) }
 
     Scaffold(
         containerColor = SoftBackground,
@@ -236,18 +237,26 @@ fun BillingScreen(
                                                 Text(inv.billNumber, fontWeight = FontWeight.Bold, color = PrimaryBlue, style = MaterialTheme.typography.titleSmall)
                                                 Text(dateStr, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                                             }
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(6.dp))
-                                                    .background(if (inv.paymentMode == "CREDIT") UdharRed.copy(alpha = 0.15f) else JamaGreen.copy(alpha = 0.15f))
-                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                                            ) {
-                                                Text(
-                                                    text = inv.paymentMode,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = if (inv.paymentMode == "CREDIT") UdharRed else JamaGreen
-                                                )
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(6.dp))
+                                                        .background(if (inv.paymentMode == "CREDIT") UdharRed.copy(alpha = 0.15f) else JamaGreen.copy(alpha = 0.15f))
+                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = inv.paymentMode,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (inv.paymentMode == "CREDIT") UdharRed else JamaGreen
+                                                    )
+                                                }
+                                                IconButton(
+                                                    onClick = { invoiceToDelete = inv },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(Icons.Default.DeleteOutline, contentDescription = "Delete Invoice", tint = UdharRed.copy(alpha = 0.8f), modifier = Modifier.size(18.dp))
+                                                }
                                             }
                                         }
 
@@ -388,6 +397,33 @@ fun BillingScreen(
                     }
                 ) {
                     Text("View Invoices")
+                }
+            }
+        )
+    }
+
+    if (invoiceToDelete != null) {
+        val inv = invoiceToDelete!!
+        AlertDialog(
+            onDismissRequest = { invoiceToDelete = null },
+            title = { Text(com.example.ui.util.LanguageStrings.get("delete_bill_title"), fontWeight = FontWeight.Bold) },
+            text = {
+                Text("${com.example.ui.util.LanguageStrings.get("delete_bill_msg")} (#${inv.billNumber})")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        repository.deleteInvoice(inv.id)
+                        invoiceToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = UdharRed)
+                ) {
+                    Text(com.example.ui.util.LanguageStrings.get("delete"))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { invoiceToDelete = null }) {
+                    Text(com.example.ui.util.LanguageStrings.get("cancel"))
                 }
             }
         )
@@ -715,7 +751,7 @@ fun BillStateOfSupplyLayout(
             OutlinedTextField(
                 value = state,
                 onValueChange = onStateChange,
-                placeholder = { Text("e.g. Delhi, Gujarat, Maharashtra") },
+                placeholder = { Text("e.g. Gujarat, Maharashtra, Rajasthan") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )

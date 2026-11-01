@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.Intent
+import android.util.Log
 import androidx.core.content.FileProvider
 import com.example.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,11 +49,8 @@ class AppRepository(context: Context) {
     private val _selectedInvoiceTheme = MutableStateFlow("PREMIUM_BLUE")
     val selectedInvoiceTheme: StateFlow<String> = _selectedInvoiceTheme.asStateFlow()
 
-    private val _isCloudSyncEnabled = MutableStateFlow(false)
-    val isCloudSyncEnabled: StateFlow<Boolean> = _isCloudSyncEnabled.asStateFlow()
-
-    private val _lastCloudSyncTime = MutableStateFlow(0L)
-    val lastCloudSyncTime: StateFlow<Long> = _lastCloudSyncTime.asStateFlow()
+    private val _corruptDataBanner = MutableStateFlow<String?>(null)
+    val corruptDataBanner: StateFlow<String?> = _corruptDataBanner.asStateFlow()
 
     init {
         loadData()
@@ -65,16 +63,15 @@ class AppRepository(context: Context) {
         _language.value = AppLanguage.entries.find { it.code == langCode } ?: AppLanguage.HINGLISH
 
         _selectedInvoiceTheme.value = prefs.getString("invoice_theme", "PREMIUM_BLUE") ?: "PREMIUM_BLUE"
-        _isCloudSyncEnabled.value = prefs.getBoolean("cloud_sync_enabled", false)
-        _lastCloudSyncTime.value = prefs.getLong("last_cloud_sync_time", 0L)
 
-        // Load store profile
-        val storeName = prefs.getString("store_name", "Ghanshyam Traders") ?: "Ghanshyam Traders"
-        val storeAddress = prefs.getString("store_address", "Shop #12, Main Market, Delhi") ?: "Shop #12, Main Market, Delhi"
-        val storePhone = prefs.getString("store_phone", "+91 98765 43210") ?: "+91 98765 43210"
-        val storeUpi = prefs.getString("store_upi", "ghanshyam@upi") ?: "ghanshyam@upi"
-        val storeGstin = prefs.getString("store_gstin", "07AAAAA0000A1Z5") ?: "07AAAAA0000A1Z5"
-        val ownerName = prefs.getString("owner_name", "Ghanshyam Lal") ?: "Ghanshyam Lal"
+        // Load store profile with clean defaults
+        val storeName = prefs.getString("store_name", "") ?: ""
+        val storeAddress = prefs.getString("store_address", "") ?: ""
+        val storePhone = prefs.getString("store_phone", "") ?: ""
+        val storeUpi = prefs.getString("store_upi", "") ?: ""
+        val storeGstin = prefs.getString("store_gstin", "") ?: ""
+        val ownerName = prefs.getString("owner_name", "") ?: ""
+        val storeState = prefs.getString("store_state", "Gujarat") ?: "Gujarat"
 
         _storeProfile.value = StoreProfile(
             storeName = storeName,
@@ -82,10 +79,11 @@ class AppRepository(context: Context) {
             phone = storePhone,
             upiId = storeUpi,
             gstin = storeGstin,
-            ownerName = ownerName
+            ownerName = ownerName,
+            state = storeState
         )
 
-        val isInitialized = prefs.getBoolean("has_clean_initialized_v6", false)
+        val isInitialized = prefs.getBoolean("has_clean_initialized_v7", false)
         if (!isInitialized) {
             // Fresh clean start: everything empty as explicitly requested
             _customers.value = emptyList()
@@ -93,7 +91,7 @@ class AppRepository(context: Context) {
             _inventory.value = emptyList()
             _invoices.value = emptyList()
             _cashbook.value = emptyList()
-            prefs.edit().putBoolean("has_clean_initialized_v6", true).apply()
+            prefs.edit().putBoolean("has_clean_initialized_v7", true).commit()
             saveData()
         } else {
             loadFromStorage()
@@ -102,22 +100,36 @@ class AppRepository(context: Context) {
 
     fun completeOnboarding() {
         _hasCompletedOnboarding.value = true
-        prefs.edit().putBoolean("has_completed_onboarding", true).apply()
+        prefs.edit().putBoolean("has_completed_onboarding", true).commit()
     }
 
     fun resetOnboarding() {
         _hasCompletedOnboarding.value = false
-        prefs.edit().putBoolean("has_completed_onboarding", false).apply()
+        prefs.edit().putBoolean("has_completed_onboarding", false).commit()
     }
 
     fun setLanguage(newLanguage: AppLanguage) {
         _language.value = newLanguage
-        prefs.edit().putString("selected_language", newLanguage.code).apply()
+        prefs.edit().putString("selected_language", newLanguage.code).commit()
     }
 
     fun setInvoiceTheme(themeId: String) {
         _selectedInvoiceTheme.value = themeId
-        prefs.edit().putString("invoice_theme", themeId).apply()
+        prefs.edit().putString("invoice_theme", themeId).commit()
+    }
+
+    fun dismissCorruptDataBanner() {
+        _corruptDataBanner.value = null
+    }
+
+    fun startFreshAfterCorruption() {
+        _customers.value = emptyList()
+        _transactions.value = emptyList()
+        _inventory.value = emptyList()
+        _invoices.value = emptyList()
+        _cashbook.value = emptyList()
+        _corruptDataBanner.value = null
+        saveData()
     }
 
     fun updateStoreProfile(
@@ -126,9 +138,10 @@ class AppRepository(context: Context) {
         phone: String,
         upiId: String,
         gstin: String,
-        ownerName: String
+        ownerName: String,
+        state: String = "Gujarat"
     ) {
-        _storeProfile.value = StoreProfile(storeName, address, phone, upiId, gstin, ownerName)
+        _storeProfile.value = StoreProfile(storeName, address, phone, upiId, gstin, ownerName, state)
         prefs.edit()
             .putString("store_name", storeName)
             .putString("store_address", address)
@@ -136,7 +149,8 @@ class AppRepository(context: Context) {
             .putString("store_upi", upiId)
             .putString("store_gstin", gstin)
             .putString("owner_name", ownerName)
-            .apply()
+            .putString("store_state", state)
+            .commit()
     }
 
     // Customer operations
@@ -153,12 +167,15 @@ class AppRepository(context: Context) {
     }
 
     fun deleteCustomer(customerId: String) {
+        val custTxIds = _transactions.value.filter { it.customerId == customerId }.map { it.id }.toSet()
         _customers.value = _customers.value.filter { it.id != customerId }
         _transactions.value = _transactions.value.filter { it.customerId != customerId }
+        _cashbook.value = _cashbook.value.filter { it.linkedId !in custTxIds }
         saveData()
     }
 
     // Transaction operations (Udhar / Jama)
+    // Note: addTransaction() must NOT post to the cashbook by itself! Caller controls cashbook entry.
     fun addTransaction(
         customerId: String,
         amount: Double,
@@ -174,28 +191,7 @@ class AppRepository(context: Context) {
             billNumber = billNumber
         )
         _transactions.value = listOf(newTx) + _transactions.value
-
-        // Automatically synchronize Khata with Cashbook
-        val customer = _customers.value.find { it.id == customerId }
-        val customerName = if (!customer?.name.isNullOrBlank()) customer!!.name else "Customer"
-        if (type == "GOT") {
-            addCashEntry(
-                type = "IN",
-                amount = amount,
-                category = "Khata Settlement",
-                remark = "Received from $customerName"
-            )
-        } else if (type == "GAVE") {
-            addCashEntry(
-                type = "OUT",
-                amount = amount,
-                category = "Khata Credit",
-                remark = "Given to $customerName"
-            )
-        } else {
-            saveData()
-        }
-
+        saveData()
         return newTx
     }
 
@@ -215,7 +211,9 @@ class AppRepository(context: Context) {
     fun smartSettleTransaction(
         transactionId: String,
         settledAmount: Double,
-        customerName: String
+        customerName: String,
+        paymentMode: String = "CASH",
+        addToCashbook: Boolean = true
     ): Boolean {
         val tx = _transactions.value.find { it.id == transactionId } ?: return false
         val cleanSettled = settledAmount.coerceIn(0.01, tx.amount)
@@ -225,31 +223,39 @@ class AppRepository(context: Context) {
             if (it.id == transactionId) it.copy(isCancelled = true) else it
         }
 
-        // 2. Add balancing entry to Cashbook
-        if (tx.type == "GAVE") {
-            // Settling Udhar: customer gave payment to shop -> Cash IN
-            addCashEntry(
-                type = "IN",
-                amount = cleanSettled,
-                category = "Khata Settlement",
-                remark = if (cleanSettled >= tx.amount - 0.001) {
-                    "Settled Udhar from $customerName"
-                } else {
-                    "Partial payment from $customerName (Orig: ₹${"%.2f".format(tx.amount)})"
-                }
-            )
-        } else if (tx.type == "GOT") {
-            // Settling Jama / advance: shop returns/adjusts -> Cash OUT
-            addCashEntry(
-                type = "OUT",
-                amount = cleanSettled,
-                category = "Khata Settlement",
-                remark = if (cleanSettled >= tx.amount - 0.001) {
-                    "Settled Jama for $customerName"
-                } else {
-                    "Partial settlement for $customerName"
-                }
-            )
+        // 2. Add balancing entry to Cashbook if enabled
+        if (addToCashbook) {
+            if (tx.type == "GAVE") {
+                // Settling Udhar: customer gave payment to shop -> Cash IN
+                addCashEntry(
+                    type = "IN",
+                    amount = cleanSettled,
+                    category = "Khata Settlement",
+                    remark = if (cleanSettled >= tx.amount - 0.001) {
+                        "Settled Udhar from $customerName"
+                    } else {
+                        "Partial payment from $customerName (Orig: ₹${"%.2f".format(tx.amount)})"
+                    },
+                    paymentMode = paymentMode,
+                    linkedId = tx.id,
+                    source = "settlement"
+                )
+            } else if (tx.type == "GOT") {
+                // Settling Jama / advance: shop returns/adjusts -> Cash OUT
+                addCashEntry(
+                    type = "OUT",
+                    amount = cleanSettled,
+                    category = "Khata Settlement",
+                    remark = if (cleanSettled >= tx.amount - 0.001) {
+                        "Settled Jama for $customerName"
+                    } else {
+                        "Partial settlement for $customerName"
+                    },
+                    paymentMode = paymentMode,
+                    linkedId = tx.id,
+                    source = "settlement"
+                )
+            }
         }
 
         // 3. Partial Payment: If settledAmount < tx.amount
@@ -272,6 +278,8 @@ class AppRepository(context: Context) {
 
     fun deleteTransaction(transactionId: String) {
         _transactions.value = _transactions.value.filter { it.id != transactionId }
+        // Money-moving logic is reversible: remove linked cashbook entries
+        _cashbook.value = _cashbook.value.filter { it.linkedId != transactionId }
         saveData()
     }
 
@@ -345,8 +353,19 @@ class AppRepository(context: Context) {
             }
         }
 
-        // If payment mode is CREDIT and customer exists or named, add udhar transaction
-        if (invoice.paymentMode == "CREDIT" && invoice.customerName.isNotBlank()) {
+        // paymentMode CASH or UPI posts ONE Cash IN for invoice total (source = "invoice", linkedId = invoice.id)
+        if (invoice.paymentMode == "CASH" || invoice.paymentMode == "UPI") {
+            addCashEntry(
+                type = "IN",
+                amount = invoice.totalAmount,
+                category = "Sales",
+                remark = "Bill #${invoice.billNumber} (${if (invoice.customerName.isNotBlank()) invoice.customerName else "Cash Customer"})",
+                paymentMode = invoice.paymentMode,
+                linkedId = invoice.id,
+                source = "invoice"
+            )
+        } else if (invoice.paymentMode == "CREDIT" && invoice.customerName.isNotBlank()) {
+            // CREDIT posts nothing to the cashbook and creates the udhar (GAVE) entry only
             var customer = _customers.value.find { it.name.equals(invoice.customerName, ignoreCase = true) }
             if (customer == null) {
                 customer = addCustomer(invoice.customerName, invoice.customerPhone)
@@ -364,18 +383,51 @@ class AppRepository(context: Context) {
         return invoice
     }
 
+    fun deleteInvoice(invoiceId: String) {
+        val invoice = _invoices.value.find { it.id == invoiceId } ?: return
+
+        // 1. Restore inventory stock
+        invoice.items.forEach { line ->
+            val matching = _inventory.value.find { it.name.equals(line.name, ignoreCase = true) }
+            if (matching != null) {
+                updateInventoryStock(matching.id, line.quantity)
+            }
+        }
+
+        // 2. Remove linked cashbook entries
+        _cashbook.value = _cashbook.value.filter { it.linkedId != invoice.id }
+
+        // 3. Remove linked credit transaction if created
+        if (invoice.billNumber.isNotBlank()) {
+            val txsToRemove = _transactions.value.filter { it.billNumber == invoice.billNumber }
+            val txIds = txsToRemove.map { it.id }.toSet()
+            _transactions.value = _transactions.value.filter { it.billNumber != invoice.billNumber }
+            _cashbook.value = _cashbook.value.filter { it.linkedId !in txIds }
+        }
+
+        // 4. Remove invoice
+        _invoices.value = _invoices.value.filter { it.id != invoiceId }
+        saveData()
+    }
+
     // Cashbook operations
     fun addCashEntry(
         type: String, // "IN" or "OUT"
         amount: Double,
         category: String,
-        remark: String = ""
+        remark: String = "",
+        paymentMode: String = "CASH",
+        linkedId: String? = null,
+        source: String = "manual"
     ): CashEntry {
         val entry = CashEntry(
             type = type,
             amount = amount,
             category = category,
-            remark = remark
+            remark = remark,
+            paymentMode = paymentMode,
+            linkedId = linkedId,
+            source = source
         )
         _cashbook.value = listOf(entry) + _cashbook.value
         saveData()
@@ -387,64 +439,73 @@ class AppRepository(context: Context) {
         saveData()
     }
 
-    // Khatabook Import Simulation (phone-number based)
-    fun importFromKhatabook(phone: String): Int {
-        val importedCustomers = listOf(
-            Customer(name = "Rajesh Sharma", phone = phone.ifBlank { "+91 98200 12345" }, address = "Civil Lines"),
-            Customer(name = "Amit Verma", phone = "+91 98111 22334", address = "Sector 14"),
-            Customer(name = "Pooja Gupta", phone = "+91 99222 33445", address = "Market Road"),
-            Customer(name = "Suresh Tailors", phone = "+91 97333 44556", address = "Cloth Market")
-        )
+    // Real CSV Customer Import (columns: name, phone, balance; positive balance = customer owes shop)
+    fun previewCustomersFromCsv(csvText: String): List<CsvCustomerPreview> {
+        val lines = csvText.lines().map { it.trim() }.filter { it.isNotBlank() }
+        if (lines.isEmpty()) return emptyList()
 
-        val newCustomerList = _customers.value.toMutableList()
-        val newTxList = _transactions.value.toMutableList()
+        val existing = _customers.value
+        val result = mutableListOf<CsvCustomerPreview>()
 
-        importedCustomers.forEach { cust ->
-            if (newCustomerList.none { it.phone == cust.phone }) {
-                newCustomerList.add(cust)
-                // Add sample entries for Rajesh Sharma as mentioned by user:
-                if (cust.name == "Rajesh Sharma") {
-                    newTxList.add(Transaction(customerId = cust.id, amount = 1850.0, type = "GAVE", note = "Old Udhar"))
-                    newTxList.add(Transaction(customerId = cust.id, amount = 400.0, type = "GOT", note = "Cash Payment"))
-                } else if (cust.name == "Amit Verma") {
-                    newTxList.add(Transaction(customerId = cust.id, amount = 950.0, type = "GAVE", note = "Goods delivery"))
+        val firstLineLower = lines[0].lowercase()
+        val startIndex = if (firstLineLower.contains("name") || firstLineLower.contains("phone") || firstLineLower.contains("balance")) 1 else 0
+
+        for (i in startIndex until lines.size) {
+            val parts = lines[i].split(",").map { it.trim().removeSurrounding("\"") }
+            if (parts.isEmpty()) continue
+            val rawName = parts.getOrNull(0) ?: ""
+            if (rawName.isBlank()) continue
+
+            val rawPhone = parts.getOrNull(1) ?: ""
+            val rawBalanceStr = parts.getOrNull(2) ?: "0"
+            val balance = rawBalanceStr.toDoubleOrNull() ?: 0.0
+
+            val normPhone = rawPhone.replace(Regex("[^0-9]"), "")
+            val isDup = existing.any { cust ->
+                val existingNorm = cust.phone.replace(Regex("[^0-9]"), "")
+                if (normPhone.isNotBlank() && existingNorm.isNotBlank()) {
+                    normPhone == existingNorm
+                } else {
+                    cust.name.trim().equals(rawName.trim(), ignoreCase = true)
+                }
+            } || result.any { r ->
+                val prevNorm = r.phone.replace(Regex("[^0-9]"), "")
+                if (normPhone.isNotBlank() && prevNorm.isNotBlank()) {
+                    normPhone == prevNorm
+                } else {
+                    r.name.trim().equals(rawName.trim(), ignoreCase = true)
                 }
             }
-        }
 
-        _customers.value = newCustomerList
-        _transactions.value = newTxList
-        saveData()
-        return importedCustomers.size
+            result.add(CsvCustomerPreview(name = rawName, phone = rawPhone, balance = balance, isDuplicate = isDup))
+        }
+        return result
     }
 
-    // Populate sample data optionally
-    fun loadSampleData() {
-        val ramesh = Customer(name = "Rajesh Sharma", phone = "+91 98200 12345", address = "Shop #4, Market")
-        val sunita = Customer(name = "Sunita Devi", phone = "+91 98101 67890", address = "House 12")
-        val vikram = Customer(name = "Vikram Patel", phone = "+91 99202 54321", address = "Ring Road")
+    fun importCustomersFromCsv(previews: List<CsvCustomerPreview>): Int {
+        val nonDuplicates = previews.filter { !it.isDuplicate }
+        var importedCount = 0
 
-        _customers.value = listOf(ramesh, sunita, vikram)
-
-        _transactions.value = listOf(
-            Transaction(customerId = ramesh.id, amount = 1850.0, type = "GAVE", note = "Grocery items"),
-            Transaction(customerId = ramesh.id, amount = 400.0, type = "GOT", note = "UPI Payment"),
-            Transaction(customerId = sunita.id, amount = 650.0, type = "GAVE", note = "Milk & Bread"),
-            Transaction(customerId = vikram.id, amount = 1200.0, type = "GOT", note = "Advance")
-        )
-
-        _inventory.value = listOf(
-            InventoryItem(name = "Basmati Rice 5kg", itemCode = "RIC01", salePrice = 450.0, purchasePrice = 380.0, stock = 24, category = "Grains", gstPercent = 5.0),
-            InventoryItem(name = "Cotton Shirt (L)", itemCode = "SHT02", salePrice = 799.0, purchasePrice = 450.0, stock = 15, category = "Clothing", sizes = listOf("M", "L", "XL"), gstPercent = 12.0),
-            InventoryItem(name = "Refined Oil 1L", itemCode = "OIL03", salePrice = 145.0, purchasePrice = 120.0, stock = 30, category = "Grocery", gstPercent = 5.0)
-        )
-
-        _cashbook.value = listOf(
-            CashEntry(type = "IN", amount = 2500.0, category = "Sales", remark = "Morning counter cash"),
-            CashEntry(type = "OUT", amount = 60.0, category = "Refreshment", remark = "Chai samosa")
-        )
-
+        for (item in nonDuplicates) {
+            val cust = addCustomer(name = item.name, phone = item.phone)
+            if (Math.abs(item.balance) > 0.009) {
+                addTransaction(
+                    customerId = cust.id,
+                    amount = Math.abs(item.balance),
+                    type = if (item.balance > 0) "GAVE" else "GOT",
+                    note = "Opening Balance (CSV Import)"
+                )
+            }
+            importedCount++
+        }
         saveData()
+        return importedCount
+    }
+
+    fun importCustomersFromCsv(csvText: String): Pair<Int, Int> {
+        val preview = previewCustomersFromCsv(csvText)
+        val imported = importCustomersFromCsv(preview)
+        return Pair(imported, preview.size - imported)
     }
 
     fun clearAllData() {
@@ -553,31 +614,37 @@ class AppRepository(context: Context) {
                 o.put("category", c.category)
                 o.put("remark", c.remark)
                 o.put("date", c.date)
+                o.put("paymentMode", c.paymentMode)
+                if (c.linkedId != null) o.put("linkedId", c.linkedId)
+                o.put("source", c.source)
                 cashArr.put(o)
             }
             json.put("cashbook", cashArr)
 
-            prefs.edit().putString("app_saved_data", json.toString()).apply()
-
-            if (_isCloudSyncEnabled.value) {
-                val now = System.currentTimeMillis()
-                _lastCloudSyncTime.value = now
-                prefs.edit().putLong("last_cloud_sync_time", now).apply()
-            }
-        } catch (_: Exception) {}
+            // Critical write: use commit() rather than apply()
+            prefs.edit().putString("app_saved_data", json.toString()).commit()
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Failed to save data: ${e.message}", e)
+        }
     }
 
     private fun loadFromStorage() {
+        val saved = prefs.getString("app_saved_data", null) ?: return
         try {
-            val saved = prefs.getString("app_saved_data", null) ?: return
             val json = JSONObject(saved)
+
+            // Parse into temporary lists first
+            val tempCustomers = mutableListOf<Customer>()
+            val tempTransactions = mutableListOf<Transaction>()
+            val tempInventory = mutableListOf<InventoryItem>()
+            val tempInvoices = mutableListOf<Invoice>()
+            val tempCashbook = mutableListOf<CashEntry>()
 
             if (json.has("customers")) {
                 val arr = json.getJSONArray("customers")
-                val list = mutableListOf<Customer>()
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
-                    list.add(Customer(
+                    tempCustomers.add(Customer(
                         id = o.optString("id", UUID.randomUUID().toString()),
                         name = o.optString("name", ""),
                         phone = o.optString("phone", ""),
@@ -586,15 +653,13 @@ class AppRepository(context: Context) {
                         createdAt = o.optLong("createdAt", System.currentTimeMillis())
                     ))
                 }
-                _customers.value = list
             }
 
             if (json.has("transactions")) {
                 val arr = json.getJSONArray("transactions")
-                val list = mutableListOf<Transaction>()
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
-                    list.add(Transaction(
+                    tempTransactions.add(Transaction(
                         id = o.optString("id", UUID.randomUUID().toString()),
                         customerId = o.optString("customerId", ""),
                         amount = o.optDouble("amount", 0.0),
@@ -605,12 +670,10 @@ class AppRepository(context: Context) {
                         billNumber = o.optString("billNumber", "")
                     ))
                 }
-                _transactions.value = list
             }
 
             if (json.has("inventory")) {
                 val arr = json.getJSONArray("inventory")
-                val list = mutableListOf<InventoryItem>()
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
                     val sizesArr = o.optJSONArray("sizes")
@@ -620,7 +683,7 @@ class AppRepository(context: Context) {
                             sizes.add(sizesArr.getString(s))
                         }
                     }
-                    list.add(InventoryItem(
+                    tempInventory.add(InventoryItem(
                         id = o.optString("id", UUID.randomUUID().toString()),
                         name = o.optString("name", ""),
                         itemCode = o.optString("itemCode", ""),
@@ -632,12 +695,10 @@ class AppRepository(context: Context) {
                         gstPercent = o.optDouble("gstPercent", 0.0)
                     ))
                 }
-                _inventory.value = list
             }
 
             if (json.has("invoices")) {
                 val arr = json.getJSONArray("invoices")
-                val list = mutableListOf<Invoice>()
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
                     val itemsArr = o.optJSONArray("items")
@@ -655,7 +716,7 @@ class AppRepository(context: Context) {
                             ))
                         }
                     }
-                    list.add(Invoice(
+                    tempInvoices.add(Invoice(
                         id = o.optString("id", UUID.randomUUID().toString()),
                         billNumber = o.optString("billNumber", ""),
                         date = o.optLong("date", System.currentTimeMillis()),
@@ -668,69 +729,154 @@ class AppRepository(context: Context) {
                         additionalCharges = o.optDouble("additionalCharges", 0.0),
                         totalAmount = o.optDouble("totalAmount", 0.0),
                         paymentMode = o.optString("paymentMode", "CASH"),
-                        stateOfSupply = o.optString("stateOfSupply", "Delhi"),
+                        stateOfSupply = o.optString("stateOfSupply", "Gujarat"),
                         gstin = o.optString("gstin", ""),
                         notes = o.optString("notes", ""),
                         themeName = o.optString("themeName", "PREMIUM_BLUE")
                     ))
                 }
-                _invoices.value = list
             }
 
             if (json.has("cashbook")) {
                 val arr = json.getJSONArray("cashbook")
-                val list = mutableListOf<CashEntry>()
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
-                    list.add(CashEntry(
+                    tempCashbook.add(CashEntry(
                         id = o.optString("id", UUID.randomUUID().toString()),
                         type = o.optString("type", "IN"),
                         amount = o.optDouble("amount", 0.0),
                         category = o.optString("category", ""),
                         remark = o.optString("remark", ""),
-                        date = o.optLong("date", System.currentTimeMillis())
+                        date = o.optLong("date", System.currentTimeMillis()),
+                        paymentMode = o.optString("paymentMode", "CASH"),
+                        linkedId = if (o.has("linkedId") && !o.isNull("linkedId")) o.getString("linkedId") else null,
+                        source = o.optString("source", "manual")
                     ))
                 }
-                _cashbook.value = list
             }
-        } catch (_: Exception) {}
-    }
 
-    // ==========================================
-    // 1. CLOUD SYNC & FIREBASE BACKUP
-    // ==========================================
-
-    fun setCloudSyncEnabled(enabled: Boolean) {
-        _isCloudSyncEnabled.value = enabled
-        prefs.edit().putBoolean("cloud_sync_enabled", enabled).apply()
-        if (enabled) {
-            triggerCloudSync()
+            // Assign to state only if parsing completes successfully
+            _customers.value = tempCustomers
+            _transactions.value = tempTransactions
+            _inventory.value = tempInventory
+            _invoices.value = tempInvoices
+            _cashbook.value = tempCashbook
+            _corruptDataBanner.value = null
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Error parsing saved data: ${e.message}", e)
+            val timestamp = System.currentTimeMillis()
+            prefs.edit().putString("app_saved_data_corrupt_$timestamp", saved).commit()
+            _corruptDataBanner.value = "Data parsing error detected. Corrupt data backed up safely."
+            // Do NOT call saveData() to prevent overwriting
         }
     }
 
-    fun triggerCloudSync(onResult: ((Boolean, String) -> Unit)? = null) {
-        val now = System.currentTimeMillis()
-        _lastCloudSyncTime.value = now
-        prefs.edit().putLong("last_cloud_sync_time", now).apply()
-        onResult?.invoke(true, "Cloud backup completed! All 4 collections (Khata, Transactions, Stock, Invoices) synchronized safely.")
-    }
-
     // ==========================================
-    // 2. LOCAL JSON BACKUP & RESTORE
+    // HONEST PLAIN-JSON BACKUP & RESTORE
     // ==========================================
 
     fun exportDataAsJsonString(): String {
         return prefs.getString("app_saved_data", "{}") ?: "{}"
     }
 
-    fun importDataFromJsonString(jsonStr: String): Boolean {
+    fun validateBackupJson(jsonStr: String): ImportResult {
         return try {
             val json = JSONObject(jsonStr)
-            prefs.edit().putString("app_saved_data", json.toString()).apply()
+            val expectedKeys = listOf("customers", "transactions", "inventory", "invoices", "cashbook")
+            var foundAny = false
+            for (k in expectedKeys) {
+                if (json.has(k)) foundAny = true
+            }
+            if (!foundAny) {
+                return ImportResult(success = false, errorMessage = "Backup JSON missing expected data arrays")
+            }
+
+            var custCount = 0
+            if (json.has("customers")) {
+                val arr = json.getJSONArray("customers")
+                custCount = arr.length()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (o.optString("name", "").isBlank()) {
+                        return ImportResult(success = false, errorMessage = "Customer at position $i missing name")
+                    }
+                }
+            }
+
+            var txCount = 0
+            if (json.has("transactions")) {
+                val arr = json.getJSONArray("transactions")
+                txCount = arr.length()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (!o.has("amount")) {
+                        return ImportResult(success = false, errorMessage = "Transaction at position $i missing amount")
+                    }
+                }
+            }
+
+            var invCount = 0
+            if (json.has("inventory")) {
+                val arr = json.getJSONArray("inventory")
+                invCount = arr.length()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (o.optString("name", "").isBlank()) {
+                        return ImportResult(success = false, errorMessage = "Inventory item at position $i missing name")
+                    }
+                }
+            }
+
+            var billCount = 0
+            if (json.has("invoices")) {
+                val arr = json.getJSONArray("invoices")
+                billCount = arr.length()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (!o.has("billNumber")) {
+                        return ImportResult(success = false, errorMessage = "Invoice at position $i missing billNumber")
+                    }
+                }
+            }
+
+            var cashCount = 0
+            if (json.has("cashbook")) {
+                val arr = json.getJSONArray("cashbook")
+                cashCount = arr.length()
+            }
+
+            ImportResult(
+                success = true,
+                customerCount = custCount,
+                transactionCount = txCount,
+                inventoryCount = invCount,
+                invoiceCount = billCount,
+                cashbookCount = cashCount
+            )
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Validation failed for backup JSON: ${e.message}", e)
+            ImportResult(success = false, errorMessage = "Invalid JSON structure: ${e.localizedMessage ?: "Syntax error"}")
+        }
+    }
+
+    fun importDataFromJsonString(jsonStr: String): ImportResult {
+        val validation = validateBackupJson(jsonStr)
+        if (!validation.success) {
+            return validation
+        }
+
+        return try {
+            // Before replacing, save the current data under "app_saved_data_prev"
+            val currentRaw = prefs.getString("app_saved_data", "{}") ?: "{}"
+            prefs.edit().putString("app_saved_data_prev", currentRaw).commit()
+
+            // Save the validated new data
+            prefs.edit().putString("app_saved_data", jsonStr).commit()
             loadFromStorage()
-            true
-        } catch (_: Exception) {
-            false
+            validation
+        } catch (e: Exception) {
+            Log.e("AppRepository", "Error applying backup: ${e.message}", e)
+            ImportResult(success = false, errorMessage = "Error applying backup: ${e.localizedMessage}")
         }
     }
 
@@ -747,14 +893,14 @@ class AppRepository(context: Context) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/json"
             putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, "Ghanshyam Kids Wear Full Data Backup")
+            putExtra(Intent.EXTRA_SUBJECT, "Ghanshyam Kids Wear Plain JSON Data Backup")
             putExtra(
                 Intent.EXTRA_TEXT,
-                "Attached is the encrypted full database backup file for Ghanshyam Kids Wear & Traders."
+                "Attached is the plain JSON database backup file for Ghanshyam Kids Wear & Traders."
             )
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(intent, "Share Full Backup File"))
+        context.startActivity(Intent.createChooser(intent, "Share Plain JSON Backup File"))
     }
 
     // ==========================================

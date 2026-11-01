@@ -2,7 +2,8 @@ package com.example
 
 import android.content.Context
 import com.example.data.AppRepository
-import com.example.model.AppLanguage
+import com.example.model.Invoice
+import com.example.model.InvoiceItem
 import com.example.ui.ai.AiResponse
 import com.example.ui.ai.GhanshyamAiEngine
 import kotlinx.coroutines.runBlocking
@@ -60,35 +61,77 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun testKhataCashbookSynchronization() {
+    fun testKhataCashbookDecouplingAndReversibility() {
         val cust = repository.addCustomer("Sunil Kumar", "+91 91234 56789")
-        // 1. Udhar transaction -> Khata Credit (Cash Out)
-        repository.addTransaction(cust.id, 500.0, "GAVE", "Purchased shirt")
-        assertEquals(1, repository.cashbook.value.size)
-        val entry1 = repository.cashbook.value.first()
-        assertEquals("OUT", entry1.type)
-        assertEquals(500.0, entry1.amount, 0.01)
-        assertEquals("Khata Credit", entry1.category)
-        assertEquals("Given to Sunil Kumar", entry1.remark)
 
-        // 2. Jama transaction -> Khata Settlement (Cash In)
-        repository.addTransaction(cust.id, 300.0, "GOT", "Part settlement")
-        assertEquals(2, repository.cashbook.value.size)
-        val entry2 = repository.cashbook.value.first() // latest entry is first
-        assertEquals("IN", entry2.type)
-        assertEquals(300.0, entry2.amount, 0.01)
-        assertEquals("Khata Settlement", entry2.category)
-        assertEquals("Received from Sunil Kumar", entry2.remark)
+        // 1. Plain Khata addTransaction must NOT automatically post to cashbook
+        val tx = repository.addTransaction(cust.id, 500.0, "GAVE", "Purchased shirt")
+        assertEquals("Plain addTransaction must not post to cashbook", 0, repository.cashbook.value.size)
+
+        // 2. Settlement with cashbook sync
+        repository.smartSettleTransaction(
+            transactionId = tx.id,
+            settledAmount = 500.0,
+            customerName = "Sunil Kumar",
+            addToCashbook = true,
+            paymentMode = "CASH"
+        )
+        assertEquals("Settling with cashbook sync adds 1 entry", 1, repository.cashbook.value.size)
+        val settleEntry = repository.cashbook.value.first()
+        assertEquals("IN", settleEntry.type)
+        assertEquals(500.0, settleEntry.amount, 0.01)
+        assertEquals("CASH", settleEntry.paymentMode)
+
+        // 3. Invoice creation: CASH bill posts ONE cash in, CREDIT posts 0 cash entries
+        val cashInvoice = Invoice(
+            billNumber = "BILL-001",
+            date = System.currentTimeMillis(),
+            customerName = "Cash Customer",
+            customerPhone = "",
+            items = listOf(InvoiceItem(name = "T-Shirt", unitPrice = 200.0, quantity = 1, gstPercent = 5.0, total = 210.0)),
+            subtotal = 200.0,
+            gstAmount = 10.0,
+            discount = 0.0,
+            additionalCharges = 0.0,
+            totalAmount = 210.0,
+            paymentMode = "CASH"
+        )
+        repository.createInvoice(cashInvoice)
+        assertEquals("Cash bill posts 1 additional entry to cashbook", 2, repository.cashbook.value.size)
+        val invoiceCashEntry = repository.cashbook.value.find { it.linkedId == cashInvoice.id }
+        assertNotNull("Invoice cashbook entry must exist", invoiceCashEntry)
+        assertEquals("invoice", invoiceCashEntry!!.source)
+
+        // 4. Deleting invoice must remove the linked cashbook entry
+        repository.deleteInvoice(cashInvoice.id)
+        assertNull("Deleted invoice cashbook entry must be removed", repository.cashbook.value.find { it.linkedId == cashInvoice.id })
     }
 
     @Test
-    fun testKhatabookImport() {
-        val count = repository.importFromKhatabook("+91 98200 12345")
-        assertTrue("Must import customers", count > 0)
-        val rajesh = repository.customers.value.find { it.name == "Rajesh Sharma" }
-        assertNotNull("Rajesh Sharma must be imported", rajesh)
-        val rajeshTx = repository.transactions.value.filter { it.customerId == rajesh!!.id }
-        assertEquals("Rajesh must have 2 transactions (1850 gave and 400 got)", 2, rajeshTx.size)
+    fun testRealCsvCustomerImport() {
+        val csvData = """
+            name,phone,balance
+            Ramesh Kumar,9820011111,1500
+            Suresh Shah,9820022222,-450
+            ,9800000000,100
+        """.trimIndent()
+
+        val previews = repository.previewCustomersFromCsv(csvData)
+        assertEquals("Should parse 2 valid rows and skip empty name", 2, previews.size)
+        assertEquals("Ramesh Kumar", previews[0].name)
+        assertEquals(1500.0, previews[0].balance, 0.01)
+
+        val importedCount = repository.importCustomersFromCsv(previews)
+        assertEquals("Should import 2 customers", 2, importedCount)
+        assertEquals(2, repository.customers.value.size)
+
+        val ramesh = repository.customers.value.find { it.name == "Ramesh Kumar" }
+        assertNotNull(ramesh)
+        assertEquals(1500.0, repository.getCustomerBalance(ramesh!!.id), 0.01)
+
+        val suresh = repository.customers.value.find { it.name == "Suresh Shah" }
+        assertNotNull(suresh)
+        assertEquals(-450.0, repository.getCustomerBalance(suresh!!.id), 0.01)
     }
 
     @Test
@@ -109,13 +152,13 @@ class ExampleRobolectricTest {
 
     @Test
     fun testPdfInvoiceGeneration() {
-        val invoice = com.example.model.Invoice(
+        val invoice = Invoice(
             billNumber = "INV-TEST-001",
             date = System.currentTimeMillis(),
             customerName = "Priya Sharma",
             customerPhone = "+91 98765 00000",
             items = listOf(
-                com.example.model.InvoiceItem(
+                InvoiceItem(
                     name = "Kids Cotton Frock",
                     quantity = 2,
                     unitPrice = 450.0,
@@ -179,10 +222,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun testBackupAndRestore() {
+    fun testBackupAndRestoreWithValidation() {
         repository.addCustomer("Deepak Patel", "+91 98765 43210")
         val jsonBackup = repository.exportDataAsJsonString()
         assertTrue("Backup contains customers", jsonBackup.contains("Deepak Patel"))
+
+        val validation = repository.validateBackupJson(jsonBackup)
+        assertTrue("Backup validation passes", validation.isValid)
+        assertEquals(1, validation.customerCount)
 
         val backupFile = repository.exportBackupFile(context)
         assertTrue("Backup file created", backupFile.exists())
@@ -192,17 +239,23 @@ class ExampleRobolectricTest {
         repository.clearAllData()
         assertTrue("Customers cleared", repository.customers.value.isEmpty())
 
-        val restored = repository.importDataFromJsonString(jsonBackup)
-        assertTrue("Restore succeeded", restored)
+        val importResult = repository.importDataFromJsonString(jsonBackup)
+        assertTrue("Restore succeeded", importResult.success)
         assertEquals("Customer restored", 1, repository.customers.value.size)
         assertEquals("Deepak Patel", repository.customers.value[0].name)
+
+        // Corrupted JSON test
+        val corruptResult = repository.importDataFromJsonString("{ corrupted json data")
+        assertFalse("Corrupted JSON restore must fail safely", corruptResult.success)
     }
 
     @Test
-    fun testCloudSyncToggleAndTrigger() {
-        assertFalse("Cloud sync initially disabled", repository.isCloudSyncEnabled.value)
-        repository.setCloudSyncEnabled(true)
-        assertTrue("Cloud sync enabled", repository.isCloudSyncEnabled.value)
-        assertTrue("Last cloud sync time updated", repository.lastCloudSyncTime.value > 0)
+    fun testSafeStorageParsingDoesNotSwallowExceptions() {
+        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("app_saved_data", "{ broken json without closing").commit()
+
+        val freshRepo = AppRepository(context)
+        assertNotNull("Corrupt data banner should be shown", freshRepo.corruptDataBanner.value)
+        assertTrue("Corrupt backup key must exist in prefs", prefs.all.keys.any { it.startsWith("app_saved_data_corrupt_") })
     }
 }

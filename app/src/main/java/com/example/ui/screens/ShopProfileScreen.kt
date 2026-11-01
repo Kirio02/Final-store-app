@@ -1,8 +1,14 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,12 +25,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.AppRepository
-import com.example.model.AppLanguage
+import com.example.model.CsvCustomerPreview
+import com.example.model.ImportResult
 import com.example.ui.theme.*
+import com.example.ui.util.LanguageStrings
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private val INDIAN_STATES = listOf(
+    "Gujarat", "Maharashtra", "Rajasthan", "Madhya Pradesh", "Delhi",
+    "Uttar Pradesh", "Punjab", "Haryana", "Karnataka", "Tamil Nadu",
+    "West Bengal", "Telangana", "Andhra Pradesh", "Kerala", "Bihar",
+    "Odisha", "Assam", "Jharkhand", "Chhattisgarh", "Uttarakhand",
+    "Goa", "Himachal Pradesh", "Jammu and Kashmir"
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ShopProfileScreen(
     repository: AppRepository,
@@ -32,9 +49,6 @@ fun ShopProfileScreen(
 ) {
     val context = LocalContext.current
     val profile by repository.storeProfile.collectAsState()
-    val currentLang by repository.language.collectAsState()
-    val isCloudSyncEnabled by repository.isCloudSyncEnabled.collectAsState()
-    val lastCloudSyncTime by repository.lastCloudSyncTime.collectAsState()
 
     var storeName by remember(profile) { mutableStateOf(profile.storeName) }
     var address by remember(profile) { mutableStateOf(profile.address) }
@@ -42,18 +56,98 @@ fun ShopProfileScreen(
     var upiId by remember(profile) { mutableStateOf(profile.upiId) }
     var gstin by remember(profile) { mutableStateOf(profile.gstin) }
     var ownerName by remember(profile) { mutableStateOf(profile.ownerName) }
+    var state by remember(profile) { mutableStateOf(profile.state.ifBlank { "Gujarat" }) }
+    var stateExpanded by remember { mutableStateOf(false) }
 
     var isSavedSnackbar by remember { mutableStateOf(false) }
+    var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    // Khatabook Import Dialog state
-    var showKhatabookDialog by remember { mutableStateOf(false) }
-    var khatabookPhone by remember { mutableStateOf(profile.phone) }
-    var importSuccessMsg by remember { mutableStateOf<String?>(null) }
+    // CSV Import State
+    var showCsvPreviewDialog by remember { mutableStateOf(false) }
+    var csvPreviews by remember { mutableStateOf<List<CsvCustomerPreview>>(emptyList()) }
 
-    // Local JSON Restore Dialog state
-    var showRestoreDialog by remember { mutableStateOf(false) }
-    var restoreJsonText by remember { mutableStateOf("") }
-    var backupStatusMsg by remember { mutableStateOf<String?>(null) }
+    val csvPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                val previews = repository.previewCustomersFromCsv(content)
+                if (previews.isEmpty()) {
+                    Toast.makeText(context, "No valid customer rows found in CSV", Toast.LENGTH_LONG).show()
+                } else {
+                    csvPreviews = previews
+                    showCsvPreviewDialog = true
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("ShopProfileScreen", "Failed to read CSV: ${e.message}", e)
+                Toast.makeText(context, "Failed to read CSV file", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Export Backup File Launcher (CreateDocument)
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val json = repository.exportDataAsJsonString()
+                context.contentResolver.openOutputStream(uri)?.use { stream ->
+                    stream.write(json.toByteArray(Charsets.UTF_8))
+                }
+                statusMessage = "✅ Backup file saved successfully (Plain JSON)!"
+            } catch (e: Exception) {
+                android.util.Log.e("ShopProfileScreen", "Failed to write backup: ${e.message}", e)
+                statusMessage = "❌ Error saving backup file: ${e.localizedMessage}"
+            }
+        }
+    }
+
+    // Backup Before Delete Launcher
+    val backupBeforeDeleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val json = repository.exportDataAsJsonString()
+                context.contentResolver.openOutputStream(uri)?.use { stream ->
+                    stream.write(json.toByteArray(Charsets.UTF_8))
+                }
+                repository.clearAllData()
+                statusMessage = "✅ Safety backup saved and all data cleared."
+            } catch (e: Exception) {
+                android.util.Log.e("ShopProfileScreen", "Failed to save safety backup: ${e.message}", e)
+                statusMessage = "❌ Backup failed. Data was NOT cleared for safety."
+            }
+        }
+    }
+
+    // Import Backup File Launcher (OpenDocument)
+    var pendingImportJson by remember { mutableStateOf("") }
+    var pendingImportValidation by remember { mutableStateOf<ImportResult?>(null) }
+    var showImportSummaryDialog by remember { mutableStateOf(false) }
+
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val json = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                val validation = repository.validateBackupJson(json)
+                pendingImportJson = json
+                pendingImportValidation = validation
+                showImportSummaryDialog = true
+            } catch (e: Exception) {
+                android.util.Log.e("ShopProfileScreen", "Failed to read backup: ${e.message}", e)
+                statusMessage = "❌ Error reading backup file: ${e.localizedMessage}"
+            }
+        }
+    }
+
+    // Clear Data Dialog State
+    var showClearDataDialog by remember { mutableStateOf(false) }
+    var deleteInputText by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -83,7 +177,7 @@ fun ShopProfileScreen(
                     }
                     Spacer(modifier = Modifier.width(14.dp))
                     Column {
-                        Text(storeName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge, color = TextPrimary)
+                        Text(storeName.ifBlank { "Store Profile" }, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge, color = TextPrimary)
                         Text("Business & GST Configuration", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                     }
                 }
@@ -95,7 +189,7 @@ fun ShopProfileScreen(
                 OutlinedTextField(
                     value = storeName,
                     onValueChange = { storeName = it },
-                    label = { Text("Store / Shop Name") },
+                    label = { Text(LanguageStrings.get("store_name_label")) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -117,8 +211,8 @@ fun ShopProfileScreen(
                     OutlinedTextField(
                         value = phone,
                         onValueChange = { phone = it },
-                        label = { Text("Store Phone Number") },
-                        placeholder = { Text("+91 98765 43210") },
+                        label = { Text(LanguageStrings.get("store_phone")) },
+                        placeholder = { Text("e.g. 9876543210") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -126,7 +220,7 @@ fun ShopProfileScreen(
                     OutlinedTextField(
                         value = upiId,
                         onValueChange = { upiId = it },
-                        label = { Text("Store UPI ID") },
+                        label = { Text(LanguageStrings.get("upi_optional_label")) },
                         placeholder = { Text("shop@upi") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
@@ -139,8 +233,8 @@ fun ShopProfileScreen(
                     OutlinedTextField(
                         value = gstin,
                         onValueChange = { gstin = it },
-                        label = { Text("GSTIN") },
-                        placeholder = { Text("07AAAAA0000A1Z5") },
+                        label = { Text(LanguageStrings.get("gstin_optional_label")) },
+                        placeholder = { Text("24AAAAA0000A1Z5") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -148,18 +242,49 @@ fun ShopProfileScreen(
                     OutlinedTextField(
                         value = ownerName,
                         onValueChange = { ownerName = it },
-                        label = { Text("Owner Name") },
+                        label = { Text(LanguageStrings.get("owner_name_label")) },
                         placeholder = { Text("Proprietor Name") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                 }
 
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // State Selector
+                ExposedDropdownMenuBox(
+                    expanded = stateExpanded,
+                    onExpandedChange = { stateExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = state,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text(LanguageStrings.get("state_label")) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = stateExpanded) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = stateExpanded,
+                        onDismissRequest = { stateExpanded = false }
+                    ) {
+                        INDIAN_STATES.forEach { item ->
+                            DropdownMenuItem(
+                                text = { Text(item) },
+                                onClick = {
+                                    state = item
+                                    stateExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Button(
                     onClick = {
-                        repository.updateStoreProfile(storeName, address, phone, upiId, gstin, ownerName)
+                        repository.updateStoreProfile(storeName, address, phone, upiId, gstin, ownerName, state)
                         isSavedSnackbar = true
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
@@ -180,7 +305,7 @@ fun ShopProfileScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Khatabook Import Card (as requested)
+        // Real CSV Customer Import Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -196,40 +321,35 @@ fun ShopProfileScreen(
                             .background(JamaGreen.copy(alpha = 0.15f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.CloudDownload, contentDescription = null, tint = JamaGreen, modifier = Modifier.size(22.dp))
+                        Icon(Icons.Default.UploadFile, contentDescription = null, tint = JamaGreen, modifier = Modifier.size(22.dp))
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
-                        Text("Import from Khatabook", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                        Text("Restore your customers & udhar via phone number backup", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                        Text(LanguageStrings.get("import_csv_title"), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                        Text(LanguageStrings.get("import_csv_desc"), style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                     }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
                 Button(
-                    onClick = { showKhatabookDialog = true },
+                    onClick = {
+                        csvPickerLauncher.launch(arrayOf("text/comma-separated-values", "text/csv", "text/plain", "*/*"))
+                    },
                     colors = ButtonDefaults.buttonColors(containerColor = JamaGreen),
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().height(46.dp)
                 ) {
-                    Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import Khatabook Backup", fontWeight = FontWeight.Bold)
-                }
-
-                if (importSuccessMsg != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(importSuccessMsg!!, color = JamaGreen, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text(LanguageStrings.get("btn_import_csv"), fontWeight = FontWeight.Bold)
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // ==========================================
-        // 1. Excel / CSV Spreadsheet Export Card
-        // ==========================================
+        // Excel / CSV Spreadsheet Export Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -256,62 +376,57 @@ fun ShopProfileScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Khata Ledger CSV
                 OutlinedButton(
                     onClick = {
                         val file = repository.exportKhataLedgerCsv(context)
-                        repository.shareCsvFile(context, file, "Open with Google Sheets / Excel or Share")
-                        backupStatusMsg = "✅ Khata Ledger CSV exported successfully!"
+                        repository.shareCsvFile(context, file, "Share Khata Ledger CSV")
+                        statusMessage = "✅ Khata Ledger CSV exported: ${file.name}"
                     },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().height(44.dp)
                 ) {
                     Icon(Icons.Default.AccountBalanceWallet, contentDescription = null, modifier = Modifier.size(18.dp), tint = PrimaryBlue)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Export Khata Ledger (CSV / Excel)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("Export Khata Ledger (CSV)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Sales Report CSV
                 OutlinedButton(
                     onClick = {
                         val file = repository.exportSalesReportCsv(context)
-                        repository.shareCsvFile(context, file, "Open with Google Sheets / Excel or Share")
-                        backupStatusMsg = "✅ Sales Report CSV exported successfully!"
+                        repository.shareCsvFile(context, file, "Share Sales Report CSV")
+                        statusMessage = "✅ Sales Report CSV exported: ${file.name}"
                     },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().height(44.dp)
                 ) {
                     Icon(Icons.Default.ReceiptLong, contentDescription = null, modifier = Modifier.size(18.dp), tint = PrimaryBlue)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Export Sales Report (CSV / Excel)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("Export Sales Report (CSV)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Inventory Stock CSV
                 OutlinedButton(
                     onClick = {
                         val file = repository.exportInventoryCsv(context)
-                        repository.shareCsvFile(context, file, "Open with Google Sheets / Excel or Share")
-                        backupStatusMsg = "✅ Inventory Stock CSV exported successfully!"
+                        repository.shareCsvFile(context, file, "Share Inventory Stock CSV")
+                        statusMessage = "✅ Inventory Stock CSV exported: ${file.name}"
                     },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().height(44.dp)
                 ) {
                     Icon(Icons.Default.Inventory2, contentDescription = null, modifier = Modifier.size(18.dp), tint = PrimaryBlue)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Export Inventory Stock (CSV / Excel)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text("Export Inventory Stock (CSV)", fontWeight = FontWeight.SemiBold, color = TextPrimary)
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // ==========================================
-        // 2. Automated Cloud Backup & Local File Backup Card
-        // ==========================================
+        // Honest Plain JSON Backup & Restore Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -324,123 +439,74 @@ fun ShopProfileScreen(
                         modifier = Modifier
                             .size(40.dp)
                             .clip(CircleShape)
-                            .background(if (isCloudSyncEnabled) JamaGreen.copy(alpha = 0.15f) else ChipInactiveBg),
+                            .background(ChipActiveBg),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            Icons.Default.CloudSync,
-                            contentDescription = null,
-                            tint = if (isCloudSyncEnabled) JamaGreen else TextSecondary,
-                            modifier = Modifier.size(22.dp)
-                        )
+                        Icon(Icons.Default.FolderZip, contentDescription = null, tint = PrimaryBlue, modifier = Modifier.size(22.dp))
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Automated Cloud Backup", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                        Text(
-                            if (isCloudSyncEnabled) "Firebase Cloud Sync: Active" else "Cloud Sync: Offline Only",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isCloudSyncEnabled) JamaGreen else TextSecondary,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                    Switch(
-                        checked = isCloudSyncEnabled,
-                        onCheckedChange = { enabled ->
-                            repository.setCloudSyncEnabled(enabled)
-                            backupStatusMsg = if (enabled) "✅ Cloud backup enabled! Auto-sync active." else "Cloud sync paused. Using local storage."
-                        }
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Text(
-                    text = if (isCloudSyncEnabled) {
-                        "All customer ledgers, daily transactions, stock inventory, and invoices are automatically synced to secure cloud storage."
-                    } else {
-                        "Enable automated cloud backup to sync records seamlessly across devices and prevent data loss."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val lastSyncStr = if (lastCloudSyncTime > 0) {
-                        "Last synced: " + SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(lastCloudSyncTime))
-                    } else {
-                        "Not synced yet"
-                    }
-                    Text(lastSyncStr, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
-
-                    FilledTonalButton(
-                        onClick = {
-                            repository.triggerCloudSync { success, msg ->
-                                backupStatusMsg = msg
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Sync Now", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(LanguageStrings.get("backup_file_title"), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                        Text(LanguageStrings.get("backup_file_desc"), style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                     }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
-                HorizontalDivider(color = CardBorder)
-                Spacer(modifier = Modifier.height(14.dp))
 
-                Text("Local File Backup & Restore", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
-                            val backupFile = repository.exportBackupFile(context)
-                            repository.shareBackupFile(context, backupFile)
-                            backupStatusMsg = "✅ Full backup file generated: ${backupFile.name}"
+                            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                            exportBackupLauncher.launch("ghanshyam_backup_$timeStamp.json")
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Export Backup", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(LanguageStrings.get("export_backup"), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
 
                     OutlinedButton(
                         onClick = {
-                            restoreJsonText = repository.exportDataAsJsonString()
-                            showRestoreDialog = true
+                            val backupFile = repository.exportBackupFile(context)
+                            repository.shareBackupFile(context, backupFile)
+                            statusMessage = "Backup shared: ${backupFile.name}"
                         },
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Restore Data", fontSize = 12.sp)
+                        Text(LanguageStrings.get("share_backup"), fontSize = 11.sp)
                     }
                 }
 
-                if (backupStatusMsg != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        importBackupLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().height(42.dp)
+                ) {
+                    Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(LanguageStrings.get("restore_backup"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                if (statusMessage != null) {
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text(backupStatusMsg!!, color = JamaGreen, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text(statusMessage!!, color = if (statusMessage!!.startsWith("✅")) JamaGreen else UdharRed, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // App Guide & Walkthrough Card (as requested)
+        // App Guide & Walkthrough Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -482,7 +548,7 @@ fun ShopProfileScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Data Management (Sample Data or Clear Data)
+        // Clear All Data Card (Strictly requires typing DELETE and exports safety backup)
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -490,47 +556,165 @@ fun ShopProfileScreen(
             border = CardDefaults.outlinedCardBorder()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("Demo & Clean Slate Options", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                Spacer(modifier = Modifier.height(8.dp))
+                Text(LanguageStrings.get("clear_data_title"), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, color = UdharRed)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(LanguageStrings.get("clear_data_desc"), style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                Spacer(modifier = Modifier.height(12.dp))
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = { repository.loadSampleData() },
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Load Sample Data", fontSize = 12.sp)
-                    }
-
-                    OutlinedButton(
-                        onClick = { repository.clearAllData() },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = UdharRed),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Clear All Data", fontSize = 12.sp)
-                    }
+                OutlinedButton(
+                    onClick = {
+                        deleteInputText = ""
+                        showClearDataDialog = true
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = UdharRed),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.DeleteForever, contentDescription = null, modifier = Modifier.size(16.dp), tint = UdharRed)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(LanguageStrings.get("clear_data_title"), fontWeight = FontWeight.Bold)
                 }
             }
         }
     }
 
-    if (showKhatabookDialog) {
+    // CSV Preview Dialog
+    if (showCsvPreviewDialog) {
+        val newCount = csvPreviews.count { !it.isDuplicate }
+        val dupCount = csvPreviews.count { it.isDuplicate }
+
         AlertDialog(
-            onDismissRequest = { showKhatabookDialog = false },
-            title = { Text("Import Khatabook Phone Backup", fontWeight = FontWeight.Bold) },
+            onDismissRequest = { showCsvPreviewDialog = false },
+            title = { Text(LanguageStrings.get("csv_preview_title"), fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Total rows found: ${csvPreviews.size}")
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Text("New customers: $newCount", color = JamaGreen, fontWeight = FontWeight.Bold)
+                        if (dupCount > 0) {
+                            Text("Existing: $dupCount", color = TextSecondary)
+                        }
+                    }
+                    HorizontalDivider()
+                    LazyColumn(modifier = Modifier.heightIn(max = 240.dp)) {
+                        items(csvPreviews) { item ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(item.name, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    if (item.phone.isNotBlank()) {
+                                        Text(item.phone, fontSize = 11.sp, color = TextSecondary)
+                                    }
+                                }
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(
+                                        text = if (item.balance >= 0) "Lena: ₹${"%.2f".format(item.balance)}" else "Dena: ₹${"%.2f".format(-item.balance)}",
+                                        color = if (item.balance >= 0) JamaGreen else UdharRed,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
+                                    )
+                                    if (item.isDuplicate) {
+                                        Text("Exists (Balance updated)", fontSize = 10.sp, color = TextSecondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val imported = repository.importCustomersFromCsv(csvPreviews)
+                        statusMessage = "✅ Successfully imported $imported customers from CSV!"
+                        showCsvPreviewDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = JamaGreen)
+                ) {
+                    Text("${LanguageStrings.get("btn_confirm_import")} ($newCount new)")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCsvPreviewDialog = false }) {
+                    Text(LanguageStrings.get("btn_cancel"))
+                }
+            }
+        )
+    }
+
+    // Import Backup Summary Dialog
+    if (showImportSummaryDialog && pendingImportValidation != null) {
+        val validation = pendingImportValidation!!
+        AlertDialog(
+            onDismissRequest = { showImportSummaryDialog = false },
+            title = { Text(LanguageStrings.get("restore_summary_title"), fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (validation.isValid) {
+                        Text(LanguageStrings.get("restore_warning"), style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("• Customers: ${validation.customerCount}", fontWeight = FontWeight.SemiBold)
+                        Text("• Khata Transactions: ${validation.transactionCount}", fontWeight = FontWeight.SemiBold)
+                        Text("• Inventory Items: ${validation.inventoryCount}", fontWeight = FontWeight.SemiBold)
+                        Text("• Past Invoices: ${validation.invoiceCount}", fontWeight = FontWeight.SemiBold)
+                        Text("• Cashbook Entries: ${validation.cashbookCount}", fontWeight = FontWeight.SemiBold)
+                    } else {
+                        Text("❌ Invalid backup file:", color = UdharRed, fontWeight = FontWeight.Bold)
+                        Text(validation.errorMessage ?: "Unknown error in backup file", color = UdharRed, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                if (validation.isValid) {
+                    Button(
+                        onClick = {
+                            val result = repository.importDataFromJsonString(pendingImportJson)
+                            if (result.success) {
+                                statusMessage = "✅ ${result.message}"
+                                showImportSummaryDialog = false
+                            } else {
+                                statusMessage = "❌ ${result.message}"
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
+                    ) {
+                        Text(LanguageStrings.get("btn_confirm_restore"), fontWeight = FontWeight.Bold)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportSummaryDialog = false }) {
+                    Text(LanguageStrings.get("btn_cancel"))
+                }
+            }
+        )
+    }
+
+    // Clear Data Confirmation Dialog (Requires typing DELETE and triggers safety backup)
+    if (showClearDataDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDataDialog = false },
+            title = { Text(LanguageStrings.get("clear_data_title"), fontWeight = FontWeight.Bold, color = UdharRed) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        "Enter the phone number registered with Khatabook on Play Store to restore your customers and ledger:",
+                        LanguageStrings.get("clear_data_desc"),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary
+                        color = TextPrimary
+                    )
+                    Text(
+                        LanguageStrings.get("type_delete_hint"),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = UdharRed
                     )
                     OutlinedTextField(
-                        value = khatabookPhone,
-                        onValueChange = { khatabookPhone = it },
-                        label = { Text("Registered Phone Number") },
-                        placeholder = { Text("+91 98200 12345") },
+                        value = deleteInputText,
+                        onValueChange = { deleteInputText = it },
+                        placeholder = { Text("DELETE") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -539,61 +723,20 @@ fun ShopProfileScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val count = repository.importFromKhatabook(khatabookPhone)
-                        importSuccessMsg = "✅ Successfully imported $count customers (including Rajesh Sharma with cancelled-out tick feature)!"
-                        showKhatabookDialog = false
+                        showClearDataDialog = false
+                        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                        backupBeforeDeleteLauncher.launch("ghanshyam_backup_safety_$timeStamp.json")
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = JamaGreen)
+                    enabled = deleteInputText.trim().equals("DELETE", ignoreCase = false),
+                    colors = ButtonDefaults.buttonColors(containerColor = UdharRed)
                 ) {
-                    Text("Import Now", fontWeight = FontWeight.Bold)
+                    Text(LanguageStrings.get("btn_backup_and_clear"), fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showKhatabookDialog = false }) { Text("Cancel") }
-            }
-        )
-    }
-
-    if (showRestoreDialog) {
-        AlertDialog(
-            onDismissRequest = { showRestoreDialog = false },
-            title = { Text("Restore Data Backup", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Paste or edit the JSON backup text below to restore your Khata, stock, and billing data:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
-                    OutlinedTextField(
-                        value = restoreJsonText,
-                        onValueChange = { restoreJsonText = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 120.dp, max = 220.dp),
-                        maxLines = 10,
-                        textStyle = MaterialTheme.typography.bodySmall
-                    )
+                TextButton(onClick = { showClearDataDialog = false }) {
+                    Text(LanguageStrings.get("btn_cancel"))
                 }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val success = repository.importDataFromJsonString(restoreJsonText)
-                        if (success) {
-                            backupStatusMsg = "✅ Full database restored successfully!"
-                            showRestoreDialog = false
-                        } else {
-                            backupStatusMsg = "❌ Error: Invalid backup format. Please check JSON."
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
-                ) {
-                    Text("Restore Now", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRestoreDialog = false }) { Text("Cancel") }
             }
         )
     }

@@ -101,7 +101,7 @@ fun InvoiceDesignSelection(
                         ) {
                             Column {
                                 Text("TAX INVOICE", color = SurfaceWhite, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text("Ghanshyam Traders", color = SurfaceWhite.copy(alpha = 0.9f), fontSize = 11.sp)
+                                Text("Ghanshyam Kids Wear", color = SurfaceWhite.copy(alpha = 0.9f), fontSize = 11.sp)
                             }
                             Text("#INV-2026-001", color = SurfaceWhite, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         }
@@ -116,16 +116,16 @@ fun InvoiceDesignSelection(
                             }
                             HorizontalDivider(color = CardBorder)
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("Basmati Rice 5kg", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
-                                Text("2", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
-                                Text("₹450", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
-                                Text("₹900", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                Text("Kids Cotton Frock Set", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                                Text("12", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                                Text("₹180", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                                Text("₹2160", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = TextPrimary)
                             }
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("Refined Oil 1L", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
-                                Text("1", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
-                                Text("₹145", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
-                                Text("₹145", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                Text("Boys Denim Baba Suit", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                                Text("6", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                                Text("₹250", style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                                Text("₹1500", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, color = TextPrimary)
                             }
                         }
 

@@ -56,19 +56,20 @@ data class Invoice(
     val additionalCharges: Double = 0.0,
     val totalAmount: Double = 0.0,
     val paymentMode: String = "CASH", // CASH, UPI, CREDIT
-    val stateOfSupply: String = "Delhi",
+    val stateOfSupply: String = "Gujarat",
     val gstin: String = "",
     val notes: String = "",
     val themeName: String = "PREMIUM_BLUE"
 )
 
 data class StoreProfile(
-    val storeName: String = "Ghanshyam Traders",
-    val address: String = "Shop #12, Main Market, Delhi",
-    val phone: String = "+91 98765 43210",
-    val upiId: String = "ghanshyam@upi",
-    val gstin: String = "07AAAAA0000A1Z5",
-    val ownerName: String = "Ghanshyam Lal"
+    val storeName: String = "",
+    val address: String = "",
+    val phone: String = "",
+    val upiId: String = "",
+    val gstin: String = "",
+    val ownerName: String = "",
+    val state: String = "Gujarat"
 )
 
 data class CashEntry(
@@ -77,7 +78,30 @@ data class CashEntry(
     val amount: Double,
     val category: String,
     val remark: String = "",
-    val date: Long = System.currentTimeMillis()
+    val date: Long = System.currentTimeMillis(),
+    val paymentMode: String = "CASH", // CASH, UPI, BANK, CHEQUE
+    val linkedId: String? = null,
+    val source: String = "manual" // "manual", "invoice", "khata", "settlement"
+)
+
+data class ImportResult(
+    val success: Boolean,
+    val customerCount: Int = 0,
+    val transactionCount: Int = 0,
+    val inventoryCount: Int = 0,
+    val invoiceCount: Int = 0,
+    val cashbookCount: Int = 0,
+    val errorMessage: String? = null
+) {
+    val isValid: Boolean get() = success
+    val message: String get() = errorMessage ?: "Import successful ($customerCount customers, $transactionCount txs, $inventoryCount items, $invoiceCount bills, $cashbookCount cash entries)"
+}
+
+data class CsvCustomerPreview(
+    val name: String,
+    val phone: String,
+    val balance: Double,
+    val isDuplicate: Boolean
 )
 
 enum class AppLanguage(val code: String, val displayName: String, val nativeName: String) {

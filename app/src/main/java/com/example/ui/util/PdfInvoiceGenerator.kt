@@ -71,16 +71,26 @@ object PdfInvoiceGenerator {
         canvas.drawText("Exclusive Kids Wear, Retail & Wholesale Garments", margin, y, paint)
 
         y += 13f
-        val addressLine = if (storeProfile.address.isNotBlank()) storeProfile.address else "Main Market, Commercial Center"
-        canvas.drawText("Address: $addressLine", margin, y, paint)
+        if (storeProfile.address.isNotBlank()) {
+            val addr = if (storeProfile.state.isNotBlank()) "${storeProfile.address}, ${storeProfile.state}" else storeProfile.address
+            canvas.drawText("Address: $addr", margin, y, paint)
+            y += 13f
+        }
 
-        y += 13f
-        val contactLine = "Phone: ${storeProfile.phone.ifBlank { "+91 98765 43210" }} | Owner: ${storeProfile.ownerName.ifBlank { "Ghanshyam Lal" }}"
-        canvas.drawText(contactLine, margin, y, paint)
+        val contactParts = mutableListOf<String>()
+        if (storeProfile.phone.isNotBlank()) contactParts.add("Phone: ${storeProfile.phone}")
+        if (storeProfile.ownerName.isNotBlank()) contactParts.add("Owner: ${storeProfile.ownerName}")
+        if (contactParts.isNotEmpty()) {
+            canvas.drawText(contactParts.joinToString(" | "), margin, y, paint)
+            y += 13f
+        }
 
-        y += 13f
-        val taxLine = "GSTIN: ${storeProfile.gstin.ifBlank { "07AAAAA0000A1Z5" }} | UPI ID: ${storeProfile.upiId.ifBlank { "ghanshyam@upi" }}"
-        canvas.drawText(taxLine, margin, y, paint)
+        val taxParts = mutableListOf<String>()
+        if (storeProfile.gstin.isNotBlank()) taxParts.add("GSTIN: ${storeProfile.gstin}")
+        if (storeProfile.upiId.isNotBlank()) taxParts.add("UPI ID: ${storeProfile.upiId}")
+        if (taxParts.isNotEmpty()) {
+            canvas.drawText(taxParts.joinToString(" | "), margin, y, paint)
+        }
 
         // Invoice Title Badge (Top Right)
         val badgeWidth = 160f
@@ -262,7 +272,9 @@ object PdfInvoiceGenerator {
         val noteText = if (invoice.notes.isNotBlank()) invoice.notes else "Goods once sold can be exchanged within 7 days with bill."
         canvas.drawText(noteText, margin + 10f, y + 36f, paint)
         canvas.drawText("Thank you for shopping with ${storeProfile.storeName.ifBlank { "Ghanshyam Kids Wear" }}!", margin + 10f, y + 52f, paint)
-        canvas.drawText("For inquiries: ${storeProfile.phone.ifBlank { "+91 98765 43210" }}", margin + 10f, y + 68f, paint)
+        if (storeProfile.phone.isNotBlank()) {
+            canvas.drawText("For inquiries: ${storeProfile.phone}", margin + 10f, y + 68f, paint)
+        }
 
         paint.color = Color.rgb(148, 163, 184)
         paint.textSize = 7.5f
@@ -312,7 +324,8 @@ object PdfInvoiceGenerator {
                 pdfDocument.writeTo(out)
             }
             pdfDocument.close()
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            android.util.Log.w("PdfInvoiceGenerator", "Native PDF generation warning: ${t.message}. Generating basic PDF structure.")
             // Headless / Robolectric JVM fallback: writes valid PDF structure
             FileOutputStream(pdfFile).use { out ->
                 val fallbackPdf = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 595 842]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n162\n%%EOF\n"

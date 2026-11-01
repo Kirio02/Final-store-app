@@ -27,6 +27,7 @@ import com.example.data.AppRepository
 import com.example.model.Customer
 import com.example.model.Transaction
 import com.example.ui.theme.*
+import com.example.ui.util.LanguageStrings
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -38,6 +39,8 @@ fun CustomerDetailScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val currentLang by repository.language.collectAsState()
+    val storeProfile by repository.storeProfile.collectAsState()
     val transactions by repository.transactions.collectAsState()
     val customerTx = transactions.filter { it.customerId == customer.id }
     val balance = repository.getCustomerBalance(customer.id)
@@ -71,7 +74,9 @@ fun CustomerDetailScreen(
                         Icon(Icons.Default.Call, contentDescription = "Call", tint = PrimaryBlue)
                     }
                     IconButton(onClick = {
-                        val shareText = "Namaste ${customer.name}, Ghanshyam Traders ki taraf se aapka pending hisaab: ₹${"%.2f".format(balance)}. Kripya UPI id: ghanshyam@upi par bhugtan karein."
+                        val shopName = storeProfile.storeName.ifBlank { "Ghanshyam Kids Wear" }
+                        val upiText = if (storeProfile.upiId.isNotBlank()) " Kripya UPI id: ${storeProfile.upiId} par bhugtan karein." else ""
+                        val shareText = "Namaste ${customer.name}, $shopName ki taraf se aapka pending hisaab: ₹${"%.2f".format(balance)}.$upiText"
                         val intent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, shareText)
@@ -340,6 +345,8 @@ fun CustomerDetailScreen(
     if (showAddTxDialog) {
         var amountText by remember { mutableStateOf("") }
         var noteText by remember { mutableStateOf("") }
+        var alsoAddToCashbook by remember { mutableStateOf(true) }
+        var selectedPaymentMode by remember { mutableStateOf("CASH") }
 
         AlertDialog(
             onDismissRequest = { showAddTxDialog = false },
@@ -361,10 +368,43 @@ fun CustomerDetailScreen(
                         value = noteText,
                         onValueChange = { noteText = it },
                         label = { Text("Note / Bill Description") },
-                        placeholder = { Text("e.g. Grocery items") },
+                        placeholder = { Text("e.g. Wholesale garment items") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = LanguageStrings.get("also_add_cashbook", currentLang),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Switch(
+                            checked = alsoAddToCashbook,
+                            onCheckedChange = { alsoAddToCashbook = it }
+                        )
+                    }
+
+                    if (alsoAddToCashbook) {
+                        Text(
+                            text = LanguageStrings.get("payment_mode_label", currentLang),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("CASH", "UPI", "BANK", "CHEQUE").forEach { mode ->
+                                FilterChip(
+                                    selected = selectedPaymentMode == mode,
+                                    onClick = { selectedPaymentMode = mode },
+                                    label = { Text(mode, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                                )
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -372,12 +412,23 @@ fun CustomerDetailScreen(
                     onClick = {
                         val amt = amountText.toDoubleOrNull() ?: 0.0
                         if (amt > 0) {
-                            repository.addTransaction(
+                            val tx = repository.addTransaction(
                                 customerId = customer.id,
                                 amount = amt,
                                 type = txTypeToAdd,
                                 note = noteText
                             )
+                            if (alsoAddToCashbook) {
+                                repository.addCashEntry(
+                                    type = if (txTypeToAdd == "GOT") "IN" else "OUT",
+                                    amount = amt,
+                                    category = if (txTypeToAdd == "GOT") "Khata Settlement" else "Khata Credit",
+                                    remark = if (txTypeToAdd == "GOT") "Received from ${customer.name}" else "Given to ${customer.name}",
+                                    paymentMode = selectedPaymentMode,
+                                    linkedId = tx.id,
+                                    source = "khata"
+                                )
+                            }
                             showAddTxDialog = false
                         }
                     },
@@ -401,6 +452,8 @@ fun CustomerDetailScreen(
         val tx = txToSettle!!
         val isGave = tx.type == "GAVE"
         val parsedAmt = settleAmountText.toDoubleOrNull() ?: 0.0
+        var alsoAddToCashbook by remember { mutableStateOf(true) }
+        var settlePaymentMode by remember { mutableStateOf("CASH") }
 
         AlertDialog(
             onDismissRequest = { txToSettle = null },
@@ -451,6 +504,34 @@ fun CustomerDetailScreen(
                         }
                     }
 
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = LanguageStrings.get("also_add_cashbook", currentLang),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Switch(
+                            checked = alsoAddToCashbook,
+                            onCheckedChange = { alsoAddToCashbook = it }
+                        )
+                    }
+
+                    if (alsoAddToCashbook) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("CASH", "UPI", "BANK", "CHEQUE").forEach { mode ->
+                                FilterChip(
+                                    selected = settlePaymentMode == mode,
+                                    onClick = { settlePaymentMode = mode },
+                                    label = { Text(mode, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                                )
+                            }
+                        }
+                    }
+
                     // Explanation Box
                     Box(
                         modifier = Modifier
@@ -462,9 +543,9 @@ fun CustomerDetailScreen(
                         Text(
                             text = when {
                                 parsedAmt >= tx.amount ->
-                                    "✓ Full Payment: Original line will be crossed out and ₹${"%.2f".format(tx.amount)} recorded in Cashbook as ${if (isGave) "Cash IN" else "Cash OUT"}."
+                                    "✓ Full Payment: Original line will be crossed out${if (alsoAddToCashbook) " and ₹${"%.2f".format(tx.amount)} recorded in Cashbook as ${if (isGave) "Cash IN ($settlePaymentMode)" else "Cash OUT ($settlePaymentMode)"}" else ""}."
                                 parsedAmt in 0.01..<tx.amount ->
-                                    "✓ Partial Payment: Original line will be crossed out, ₹${"%.2f".format(parsedAmt)} recorded in Cashbook as ${if (isGave) "Cash IN" else "Cash OUT"}, and a new entry of ₹${"%.2f".format(tx.amount - parsedAmt)} will be added for the remaining balance."
+                                    "✓ Partial Payment: Original line will be crossed out${if (alsoAddToCashbook) ", ₹${"%.2f".format(parsedAmt)} recorded in Cashbook as ${if (isGave) "Cash IN ($settlePaymentMode)" else "Cash OUT ($settlePaymentMode)"}" else ""}, and a new entry of ₹${"%.2f".format(tx.amount - parsedAmt)} will be added for the remaining balance."
                                 else -> "Enter the payment amount to settle."
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -480,7 +561,9 @@ fun CustomerDetailScreen(
                             repository.smartSettleTransaction(
                                 transactionId = tx.id,
                                 settledAmount = parsedAmt,
-                                customerName = customer.name
+                                customerName = customer.name,
+                                paymentMode = settlePaymentMode,
+                                addToCashbook = alsoAddToCashbook
                             )
                             txToSettle = null
                         }
