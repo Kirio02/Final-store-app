@@ -245,9 +245,9 @@ fun KhataScreen(
                                             color = TextPrimary
                                         )
                                         Text(
-                                            text = cust.phone,
+                                            text = if (cust.phone.isNotBlank()) cust.phone else "No phone number",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = TextSecondary
+                                            color = if (cust.phone.isNotBlank()) TextSecondary else TextTertiary
                                         )
                                     }
                                 }
@@ -327,7 +327,9 @@ fun KhataScreen(
                             }
                         }
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    android.util.Log.e("KhataScreen", "Error reading contact details: ${e.message}", e)
+                }
             }
         }
 
@@ -341,7 +343,9 @@ fun KhataScreen(
                         onClick = {
                             try {
                                 contactPickerLauncher.launch(null)
-                            } catch (_: Exception) {}
+                            } catch (e: Exception) {
+                                android.util.Log.e("KhataScreen", "Failed to launch contact picker: ${e.message}", e)
+                            }
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(8.dp),
@@ -367,7 +371,7 @@ fun KhataScreen(
                         value = custPhone,
                         onValueChange = { custPhone = it },
                         label = { Text("Phone Number") },
-                        placeholder = { Text("+91 98765 43210") },
+                        placeholder = { Text("e.g. +91 98765 43210") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -388,7 +392,7 @@ fun KhataScreen(
                         if (custName.isNotBlank()) {
                             repository.addCustomer(
                                 name = custName,
-                                phone = if (custPhone.isNotBlank()) custPhone else "+91 98000 00000",
+                                phone = custPhone.trim(),
                                 address = custAddress
                             )
                             showAddCustomerDialog = false

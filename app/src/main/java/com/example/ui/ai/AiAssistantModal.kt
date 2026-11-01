@@ -147,7 +147,8 @@ fun AiAssistantModal(
         }
         try {
             speechLauncher.launch(intent)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.w("AiAssistantModal", "Speech recognition unavailable: ${e.message}", e)
             messages.add(ChatMessage(sender = "AI", text = "Mic open nahi ho saka. Kripya type karein."))
         }
     }

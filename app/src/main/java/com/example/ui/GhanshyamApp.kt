@@ -1,6 +1,8 @@
 package com.example.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -14,6 +16,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -21,18 +24,53 @@ import com.example.data.AppRepository
 import com.example.model.AppLanguage
 import com.example.model.Customer
 import com.example.ui.ai.AiAssistantModal
+import com.example.ui.components.AppLoadingScreen
 import com.example.ui.screens.*
 import com.example.ui.theme.*
 import com.example.ui.util.LanguageStrings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GhanshyamApp(
     repository: AppRepository
 ) {
+    val isInitialLoading by repository.isInitialLoading.collectAsState()
+    val isMigrationBlocked by repository.isMigrationBlocked.collectAsState()
+    val migrationError by repository.migrationError.collectAsState()
+    val migrationNotice by repository.migrationNotice.collectAsState()
     val hasCompletedOnboarding by repository.hasCompletedOnboarding.collectAsState()
     val currentLanguage by repository.language.collectAsState()
     val storeProfile by repository.storeProfile.collectAsState()
+
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var showStartFreshDialog by rememberSaveable { mutableStateOf(false) }
+    var startFreshInputText by rememberSaveable { mutableStateOf("") }
+
+    val exportDamagedLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    val rawJson = repository.getDamagedLegacyJson()
+                    context.contentResolver.openOutputStream(uri)?.use { os ->
+                        os.write(rawJson.toByteArray(Charsets.UTF_8))
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("GhanshyamApp", "Export damaged data error: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    // App Startup Loading Screen: prevents flashing OnboardingScreen for existing users
+    if (isInitialLoading) {
+        AppLoadingScreen(message = LanguageStrings.get("progress_loading", currentLanguage))
+        return
+    }
 
     var showAiModal by rememberSaveable { mutableStateOf(false) }
     var showLanguageMenu by rememberSaveable { mutableStateOf(false) }
@@ -43,8 +81,8 @@ fun GhanshyamApp(
     val customers by repository.customers.collectAsState()
     val selectedCustomer = customers.find { it.id == selectedCustomerId }
 
-    // If onboarding is not completed yet, show OnboardingScreen!
-    if (!hasCompletedOnboarding || showGuideModal) {
+    // If onboarding is not completed yet, show OnboardingScreen (unless migration is blocked)!
+    if (!isMigrationBlocked && (!hasCompletedOnboarding || showGuideModal)) {
         OnboardingScreen(
             repository = repository,
             isTutorialMode = showGuideModal,
@@ -227,13 +265,13 @@ fun GhanshyamApp(
             }
         }
     ) { padding ->
-        val corruptBanner by repository.corruptDataBanner.collectAsState()
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            if (corruptBanner != null) {
+            // Persistent Error Banner when migration failed or writes are blocked (cannot be simply dismissed)
+            if (isMigrationBlocked || migrationError != null) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -243,24 +281,72 @@ fun GhanshyamApp(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = LanguageStrings.get("corrupt_data_banner", currentLanguage),
+                            text = migrationError ?: LanguageStrings.get("corrupt_data_banner", currentLanguage),
                             color = UdharRed,
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             Button(
-                                onClick = { repository.startFreshAfterCorruption() },
-                                colors = ButtonDefaults.buttonColors(containerColor = UdharRed)
+                                onClick = { repository.retryMigration() },
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Text(LanguageStrings.get("btn_start_fresh", currentLanguage), fontSize = 12.sp)
+                                Text(LanguageStrings.get("btn_retry", currentLanguage), fontSize = 11.sp, maxLines = 1)
                             }
                             OutlinedButton(
-                                onClick = { repository.dismissCorruptDataBanner() }
+                                onClick = {
+                                    exportDamagedLauncher.launch("ghanshyam_damaged_data_${System.currentTimeMillis()}.json")
+                                },
+                                modifier = Modifier.weight(1.3f)
                             ) {
-                                Text(LanguageStrings.get("btn_cancel", currentLanguage), fontSize = 12.sp)
+                                Text(LanguageStrings.get("btn_export_damaged", currentLanguage), fontSize = 11.sp, maxLines = 1)
                             }
+                            Button(
+                                onClick = {
+                                    startFreshInputText = ""
+                                    showStartFreshDialog = true
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = UdharRed),
+                                modifier = Modifier.weight(1.1f)
+                            ) {
+                                Text(LanguageStrings.get("btn_start_fresh", currentLanguage), fontSize = 11.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Informational Notice Banner (e.g. orphan transactions recovered)
+            if (migrationNotice != null) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = PrimaryBlue.copy(alpha = 0.12f)),
+                    border = CardDefaults.outlinedCardBorder()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = migrationNotice ?: "",
+                            color = PrimaryBlue,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(onClick = { repository.dismissMigrationNotice() }) {
+                            Text(LanguageStrings.get("btn_dismiss", currentLanguage), fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -288,6 +374,62 @@ fun GhanshyamApp(
         AiAssistantModal(
             repository = repository,
             onDismiss = { showAiModal = false }
+        )
+    }
+
+    if (showStartFreshDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showStartFreshDialog = false
+                startFreshInputText = ""
+            },
+            title = {
+                Text(
+                    text = LanguageStrings.get("start_fresh_dialog_title", currentLanguage),
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = LanguageStrings.get("start_fresh_dialog_desc", currentLanguage),
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = startFreshInputText,
+                        onValueChange = { startFreshInputText = it },
+                        label = { Text(LanguageStrings.get("type_delete_hint", currentLanguage)) },
+                        placeholder = { Text("DELETE") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        repository.startFreshFromDamagedData()
+                        showStartFreshDialog = false
+                        startFreshInputText = ""
+                    },
+                    enabled = startFreshInputText.trim() == "DELETE",
+                    colors = ButtonDefaults.buttonColors(containerColor = UdharRed)
+                ) {
+                    Text(LanguageStrings.get("btn_start_fresh", currentLanguage))
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        showStartFreshDialog = false
+                        startFreshInputText = ""
+                    }
+                ) {
+                    Text(LanguageStrings.get("btn_cancel", currentLanguage))
+                }
+            }
         )
     }
 }

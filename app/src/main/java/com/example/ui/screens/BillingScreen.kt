@@ -27,7 +27,11 @@ import com.example.model.Invoice
 import com.example.model.InvoiceItem
 import com.example.ui.components.*
 import com.example.ui.theme.*
+import com.example.ui.util.LanguageStrings
 import com.example.ui.util.PdfInvoiceGenerator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -36,6 +40,10 @@ fun BillingScreen(
     repository: AppRepository
 ) {
     val context = LocalContext.current
+    val currentLang by repository.language.collectAsState()
+    val coroutineScope = rememberCoroutineScope()
+    var isGeneratingPdf by remember { mutableStateOf(false) }
+
     val invoices by repository.invoices.collectAsState()
     val selectedTheme by repository.selectedInvoiceTheme.collectAsState()
     val storeProfile by repository.storeProfile.collectAsState()
@@ -278,7 +286,13 @@ fun BillingScreen(
                                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                 OutlinedButton(
                                                     onClick = {
-                                                        PdfInvoiceGenerator.shareInvoicePdf(context, storeProfile, inv)
+                                                        coroutineScope.launch {
+                                                            isGeneratingPdf = true
+                                                            withContext(Dispatchers.IO) {
+                                                                PdfInvoiceGenerator.shareInvoicePdf(context, storeProfile, inv)
+                                                            }
+                                                            isGeneratingPdf = false
+                                                        }
                                                     },
                                                     shape = RoundedCornerShape(8.dp),
                                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
@@ -360,7 +374,13 @@ fun BillingScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
-                            PdfInvoiceGenerator.shareInvoicePdf(context, storeProfile, currentInvoice)
+                            coroutineScope.launch {
+                                isGeneratingPdf = true
+                                withContext(Dispatchers.IO) {
+                                    PdfInvoiceGenerator.shareInvoicePdf(context, storeProfile, currentInvoice)
+                                }
+                                isGeneratingPdf = false
+                            }
                             showSuccessDialog = false
                             selectedTab = 1
                         },
@@ -426,6 +446,13 @@ fun BillingScreen(
                     Text(com.example.ui.util.LanguageStrings.get("cancel"))
                 }
             }
+        )
+    }
+
+    if (isGeneratingPdf) {
+        OperationProgressDialog(
+            message = LanguageStrings.get("progress_generating_pdf", currentLang),
+            subMessage = "Rendering clean GST layout..."
         )
     }
 }
@@ -558,7 +585,7 @@ fun BillAddPartyLayout(
                 value = customerPhone,
                 onValueChange = onPhoneChange,
                 label = { Text("Phone Number") },
-                placeholder = { Text("+91 98765 43210") },
+                placeholder = { Text("e.g. +91 98765 43210") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )

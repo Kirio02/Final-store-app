@@ -93,7 +93,9 @@ class GhanshyamAiEngine(
         if (apiKey.isNotBlank() && apiKey != "YOUR_GEMINI_API_KEY") {
             try {
                 return@withContext callGeminiFallback(query)
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                android.util.Log.e("GhanshyamAiEngine", "Gemini fallback failed: ${e.message}", e)
+            }
         }
 
         // Friendly default fallback
@@ -324,7 +326,7 @@ class GhanshyamAiEngine(
                 val invoice = Invoice(
                     billNumber = billNum,
                     customerName = "Walk-in Customer",
-                    customerPhone = "+91 98000 11111",
+                    customerPhone = "",
                     items = listOf(InvoiceItem(name = "General Goods", quantity = 1, unitPrice = total, total = total)),
                     subtotal = total,
                     totalAmount = total,

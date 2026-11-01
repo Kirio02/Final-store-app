@@ -81,6 +81,18 @@ object LanguageStrings {
         "btn_save_launch" to Trans("Save & Launch Shop", "सेव करें और दुकान शुरू करें", "સેવ કરો અને દુકાન શરૂ કરો", "Save & Launch Shop"),
         "corrupt_data_banner" to Trans("Data load karne me error! Corrupt data safe rakha gaya hai.", "डेटा लोड करने में त्रुटि! सुरक्षित प्रतिलिपि सहेज ली गई है।", "ડેટા લોડ કરવામાં ભૂલ! સુરક્ષિત નકલ સાચવી રાખવામાં આવી છે.", "Error loading data! A safe backup copy was retained."),
         "btn_start_fresh" to Trans("Start Fresh", "नए सिरे से शुरू करें", "નવેસરથી શરૂ કરો", "Start Fresh"),
-        "btn_cancel" to Trans("Cancel", "रद्द करें", "રદ કરો", "Cancel")
+        "btn_cancel" to Trans("Cancel", "रद्द करें", "રદ કરો", "Cancel"),
+        "btn_retry" to Trans("Retry", "पुनः प्रयास करें", "ફરી પ્રયાસ કરો", "Retry"),
+        "btn_export_damaged" to Trans("Export Damaged Data", "क्षतिग्रस्त डेटा निर्यात करें", "ખરાબ થયેલ ડેટા નિકાસ કરો", "Export Damaged Data"),
+        "btn_start_fresh_confirm" to Trans("Start Fresh (Archive Old Data)", "पुराना डेटा हटाएं और नया शुरू करें", "જૂનો ડેટા કાઢી નાખો અને નવું શરૂ કરો", "Start Fresh (Archive Old Data)"),
+        "add_phone_number_hint" to Trans("Add a phone number", "फोन नंबर जोड़ें", "ફોન નંબર ઉમેરો", "Add a phone number"),
+        "start_fresh_dialog_title" to Trans("Start Fresh Pushti Karein", "नए सिरे से शुरू करने की पुष्टि करें", "નવેસરથી શરૂ કરવાની પુષ્ટિ કરો", "Confirm Start Fresh"),
+        "start_fresh_dialog_desc" to Trans("Purana data 'app_saved_data_discarded' me safe rakha jayega aur dobara load nahi hoga. Pushti ke liye DELETE type karein.", "पुराना डेटा बैकअप में सुरक्षित रहेगा और दोबारा लोड नहीं होगा। पुष्टि के लिए DELETE टाइप करें।", "જૂનો ડેટા સાચવવામાં આવશે અને ફરીથી લોડ થશે નહીં. પુષ્ટિ માટે DELETE ટાઇપ કરો.", "Old data will be archived safely and will not reload. Type DELETE to confirm."),
+        "progress_loading" to Trans("Dukaan ka data load ho raha hai...", "दुकान का डेटा लोड हो रहा है...", "દુકાનનો ડેટા લોડ થઈ રહ્યો છે...", "Loading store data..."),
+        "progress_exporting" to Trans("Export ho raha hai...", "निर्यात हो रहा है...", "નિકાસ થઈ રહી છે...", "Exporting..."),
+        "progress_restoring" to Trans("Backup restore ho raha hai...", "बैकअप रीस्टोर हो रहा है...", "બેકઅપ પુનઃસ્થાપિત થઈ રહ્યું છે...", "Restoring backup..."),
+        "progress_importing_csv" to Trans("CSV import ho rahi hai...", "CSV इम्पोर्ट हो रही है...", "CSV ઇમ્પોર્ટ થઈ રહી છે...", "Importing CSV..."),
+        "progress_generating_pdf" to Trans("PDF Invoice taiyar ho raha hai...", "PDF बिल तैयार हो रहा है...", "PDF બિલ તૈયાર થઈ રહ્યું છે...", "Generating PDF invoice..."),
+        "btn_dismiss" to Trans("Theek hai", "ठीक है", "ઠીક છે", "Dismiss")
     )
 }

@@ -27,7 +27,7 @@ class ExampleRobolectricTest {
         context = RuntimeEnvironment.getApplication()
         val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
-        repository = AppRepository(context)
+        repository = AppRepository(context, asyncInit = false)
         repository.clearAllData()
     }
 
@@ -255,7 +255,7 @@ class ExampleRobolectricTest {
         val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
         prefs.edit().putString("app_saved_data", "{ broken json without closing").commit()
 
-        val freshRepo = AppRepository(context)
+        val freshRepo = AppRepository(context, asyncInit = false)
         assertNotNull("Corrupt data banner should be shown", freshRepo.corruptDataBanner.value)
         assertTrue("Corrupt backup key must exist in prefs", prefs.all.keys.any { it.startsWith("app_saved_data_corrupt_") })
     }
@@ -286,7 +286,7 @@ class ExampleRobolectricTest {
 
         prefs.edit().putString("app_saved_data", legacyJson).commit()
 
-        val migratedRepo = AppRepository(context)
+        val migratedRepo = AppRepository(context, asyncInit = false)
 
         // 1. Check old key was renamed to app_saved_data_migrated and app_saved_data was removed
         assertFalse("app_saved_data must no longer exist after migration", prefs.contains("app_saved_data"))
@@ -320,7 +320,7 @@ class ExampleRobolectricTest {
         )
 
         // Instantiate a second repository pointing to the same Room database
-        val repo2 = AppRepository(context)
+        val repo2 = AppRepository(context, asyncInit = false)
         val loadedCust = repo2.customers.value.find { it.id == cust.id }
         assertNotNull("Customer must persist in Room across repository instances", loadedCust)
         assertEquals("Ketan Patel", loadedCust!!.name)
@@ -343,6 +343,146 @@ class ExampleRobolectricTest {
 
         assertEquals("Customer deleted", 0, repository.customers.value.count { it.id == cust.id })
         assertEquals("Cascade deleted customer transactions", 0, repository.transactions.value.count { it.customerId == cust.id })
+    }
+
+    @Test
+    fun testTolerantMigrationAttachesOrphansToRecoveredEntries() {
+        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        repository.clearAllData()
+
+        val legacyJsonWithOrphan = """
+            {
+                "customers": [
+                    {"id": "c-1", "name": "Valid Customer", "phone": "9898011111", "address": "", "gstin": ""}
+                ],
+                "transactions": [
+                    {"id": "tx-orphan-1", "customerId": "unknown-nonexistent-id", "amount": 1500.0, "type": "GAVE", "note": "Orphan Udhar", "date": 1600000000000, "isCancelled": false}
+                ],
+                "inventory": [],
+                "invoices": [],
+                "cashbook": []
+            }
+        """.trimIndent()
+
+        prefs.edit().putString("app_saved_data", legacyJsonWithOrphan).commit()
+
+        val repo = AppRepository(context, asyncInit = false)
+        assertFalse("app_saved_data must no longer exist after migration", prefs.contains("app_saved_data"))
+        assertTrue("app_saved_data_migrated must exist", prefs.contains("app_saved_data_migrated"))
+
+        // Should have created "Recovered entries" customer
+        val recoveredCust = repo.customers.value.find { it.name == "Recovered entries" }
+        assertNotNull("Recovered entries customer should be auto-created for orphans", recoveredCust)
+
+        // Transaction should be attached to this customer
+        val orphanTx = repo.transactions.value.find { it.id == "tx-orphan-1" }
+        assertNotNull("Orphan transaction must be saved", orphanTx)
+        assertEquals(recoveredCust!!.id, orphanTx!!.customerId)
+
+        // Migration notice must report recovered count
+        assertNotNull(repo.migrationNotice.value)
+        assertTrue(repo.migrationNotice.value!!.contains("1"))
+    }
+
+    @Test
+    fun testTolerantBackupImportAttachesOrphansToRecoveredEntries() {
+        val backupWithOrphan = """
+            {
+                "customers": [
+                    {"id": "c-backup-1", "name": "Existing Party", "phone": "9999900000", "address": "", "gstin": ""}
+                ],
+                "transactions": [
+                    {"id": "tx-orphan-2", "customerId": "missing-party-id", "amount": 750.0, "type": "GOT", "note": "Orphan Jama", "date": 1600000000000, "isCancelled": false}
+                ],
+                "inventory": [],
+                "invoices": [],
+                "cashbook": []
+            }
+        """.trimIndent()
+
+        val result = repository.importDataFromJsonString(backupWithOrphan)
+        assertTrue("Import must succeed tolerantly", result.success)
+        assertEquals("Should report 1 repaired orphan transaction", 1, result.repairedCount)
+
+        val recoveredCust = repository.customers.value.find { it.name == "Recovered entries" }
+        assertNotNull("Recovered entries party must exist", recoveredCust)
+        val orphanTx = repository.transactions.value.find { it.id == "tx-orphan-2" }
+        assertNotNull("Orphan transaction must exist in repository", orphanTx)
+        assertEquals(recoveredCust!!.id, orphanTx!!.customerId)
+    }
+
+    @Test
+    fun testBlockedWritesWhenMigrationFailsAndRawDataPreserved() {
+        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+
+        val damagedRawJson = """{ "customers": [ { incomplete json """
+        prefs.edit()
+            .putString("app_saved_data", damagedRawJson)
+            .putString("legacy_migration_error", "Broken JSON syntax in legacy store")
+            .commit()
+
+        val brokenRepo = AppRepository(context, asyncInit = false)
+        assertTrue("Writes must be blocked when migration error is active", brokenRepo.isMigrationBlocked.value)
+        assertEquals(damagedRawJson, prefs.getString("app_saved_data", null)) // MUST BE UNTOUCHED
+
+        // Verify write operation throws IllegalStateException
+        try {
+            brokenRepo.addCustomer("Should Fail", "9876543210")
+            fail("addCustomer must throw IllegalStateException when migration is blocked")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("blocked"))
+        }
+
+        // Verify app_saved_data is still untouched
+        assertEquals(damagedRawJson, prefs.getString("app_saved_data", null))
+    }
+
+    @Test
+    fun testStartFreshArchivesDamagedJson() {
+        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+
+        val damagedRawJson = """{ "damaged": true }"""
+        prefs.edit()
+            .putString("app_saved_data", damagedRawJson)
+            .putString("legacy_migration_error", "Fatal corruption")
+            .commit()
+
+        val repo = AppRepository(context, asyncInit = false)
+        assertTrue("Initially blocked", repo.isMigrationBlocked.value)
+
+        repo.startFreshFromDamagedData()
+
+        assertFalse("app_saved_data must be removed after starting fresh", prefs.contains("app_saved_data"))
+        assertFalse("legacy_migration_error must be removed", prefs.contains("legacy_migration_error"))
+        assertFalse("Writes should no longer be blocked", repo.isMigrationBlocked.value)
+
+        val discardedKey = prefs.all.keys.find { it.startsWith("app_saved_data_discarded_") }
+        assertNotNull("Archived discarded key must exist", discardedKey)
+        assertEquals(damagedRawJson, prefs.getString(discardedKey, null))
+
+        // Writes must now succeed without error
+        val newCust = repo.addCustomer("Fresh Customer", "9800012345")
+        assertNotNull(newCust)
+        assertEquals(1, repo.customers.value.size)
+    }
+
+    @Test
+    fun testInvoiceThemeLegacyKeyRead() {
+        val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        repository.clearAllData()
+        runBlocking {
+            repository.database.appSettingsDao().delete()
+        }
+
+        // Test that "invoice_theme" pref key is read
+        prefs.edit().putString("invoice_theme", "EMERALD_GREEN").commit()
+
+        val repo = AppRepository(context, asyncInit = false)
+        assertEquals("EMERALD_GREEN", repo.selectedInvoiceTheme.value)
     }
 }
 

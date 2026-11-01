@@ -27,8 +27,12 @@ import androidx.compose.ui.unit.sp
 import com.example.data.AppRepository
 import com.example.model.CsvCustomerPreview
 import com.example.model.ImportResult
+import com.example.ui.components.OperationProgressDialog
 import com.example.ui.theme.*
 import com.example.ui.util.LanguageStrings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -48,6 +52,8 @@ fun ShopProfileScreen(
     onOpenGuide: () -> Unit
 ) {
     val context = LocalContext.current
+    val currentLang by repository.language.collectAsState()
+    val coroutineScope = rememberCoroutineScope()
     val profile by repository.storeProfile.collectAsState()
 
     var storeName by remember(profile) { mutableStateOf(profile.storeName) }
@@ -61,6 +67,7 @@ fun ShopProfileScreen(
 
     var isSavedSnackbar by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+    var progressMessage by remember { mutableStateOf<String?>(null) }
 
     // CSV Import State
     var showCsvPreviewDialog by remember { mutableStateOf(false) }
@@ -70,18 +77,27 @@ fun ShopProfileScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            try {
-                val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-                val previews = repository.previewCustomersFromCsv(content)
-                if (previews.isEmpty()) {
-                    Toast.makeText(context, "No valid customer rows found in CSV", Toast.LENGTH_LONG).show()
-                } else {
-                    csvPreviews = previews
-                    showCsvPreviewDialog = true
+            coroutineScope.launch {
+                progressMessage = LanguageStrings.get("progress_loading", currentLang)
+                try {
+                    val content = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                    }
+                    val previews = withContext(Dispatchers.IO) {
+                        repository.previewCustomersFromCsv(content)
+                    }
+                    if (previews.isEmpty()) {
+                        Toast.makeText(context, "No valid customer rows found in CSV", Toast.LENGTH_LONG).show()
+                    } else {
+                        csvPreviews = previews
+                        showCsvPreviewDialog = true
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ShopProfileScreen", "Failed to read CSV: ${e.message}", e)
+                    Toast.makeText(context, "Failed to read CSV file", Toast.LENGTH_SHORT).show()
+                } finally {
+                    progressMessage = null
                 }
-            } catch (e: Exception) {
-                android.util.Log.e("ShopProfileScreen", "Failed to read CSV: ${e.message}", e)
-                Toast.makeText(context, "Failed to read CSV file", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -91,15 +107,22 @@ fun ShopProfileScreen(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? ->
         if (uri != null) {
-            try {
-                val json = repository.exportDataAsJsonString()
-                context.contentResolver.openOutputStream(uri)?.use { stream ->
-                    stream.write(json.toByteArray(Charsets.UTF_8))
+            coroutineScope.launch {
+                progressMessage = LanguageStrings.get("progress_exporting", currentLang)
+                try {
+                    val json = withContext(Dispatchers.IO) { repository.exportDataAsJsonString() }
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri)?.use { stream ->
+                            stream.write(json.toByteArray(Charsets.UTF_8))
+                        }
+                    }
+                    statusMessage = "✅ Backup file saved successfully (Plain JSON)!"
+                } catch (e: Exception) {
+                    android.util.Log.e("ShopProfileScreen", "Failed to write backup: ${e.message}", e)
+                    statusMessage = "❌ Error saving backup file: ${e.localizedMessage}"
+                } finally {
+                    progressMessage = null
                 }
-                statusMessage = "✅ Backup file saved successfully (Plain JSON)!"
-            } catch (e: Exception) {
-                android.util.Log.e("ShopProfileScreen", "Failed to write backup: ${e.message}", e)
-                statusMessage = "❌ Error saving backup file: ${e.localizedMessage}"
             }
         }
     }
@@ -109,16 +132,23 @@ fun ShopProfileScreen(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? ->
         if (uri != null) {
-            try {
-                val json = repository.exportDataAsJsonString()
-                context.contentResolver.openOutputStream(uri)?.use { stream ->
-                    stream.write(json.toByteArray(Charsets.UTF_8))
+            coroutineScope.launch {
+                progressMessage = LanguageStrings.get("progress_exporting", currentLang)
+                try {
+                    val json = withContext(Dispatchers.IO) { repository.exportDataAsJsonString() }
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri)?.use { stream ->
+                            stream.write(json.toByteArray(Charsets.UTF_8))
+                        }
+                    }
+                    withContext(Dispatchers.IO) { repository.clearAllData() }
+                    statusMessage = "✅ Safety backup saved and all data cleared."
+                } catch (e: Exception) {
+                    android.util.Log.e("ShopProfileScreen", "Failed to save safety backup: ${e.message}", e)
+                    statusMessage = "❌ Backup failed. Data was NOT cleared for safety."
+                } finally {
+                    progressMessage = null
                 }
-                repository.clearAllData()
-                statusMessage = "✅ Safety backup saved and all data cleared."
-            } catch (e: Exception) {
-                android.util.Log.e("ShopProfileScreen", "Failed to save safety backup: ${e.message}", e)
-                statusMessage = "❌ Backup failed. Data was NOT cleared for safety."
             }
         }
     }
@@ -132,15 +162,24 @@ fun ShopProfileScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            try {
-                val json = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-                val validation = repository.validateBackupJson(json)
-                pendingImportJson = json
-                pendingImportValidation = validation
-                showImportSummaryDialog = true
-            } catch (e: Exception) {
-                android.util.Log.e("ShopProfileScreen", "Failed to read backup: ${e.message}", e)
-                statusMessage = "❌ Error reading backup file: ${e.localizedMessage}"
+            coroutineScope.launch {
+                progressMessage = LanguageStrings.get("progress_loading", currentLang)
+                try {
+                    val json = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                    }
+                    val validation = withContext(Dispatchers.IO) {
+                        repository.validateBackupJson(json)
+                    }
+                    pendingImportJson = json
+                    pendingImportValidation = validation
+                    showImportSummaryDialog = true
+                } catch (e: Exception) {
+                    android.util.Log.e("ShopProfileScreen", "Failed to read backup: ${e.message}", e)
+                    statusMessage = "❌ Error reading backup file: ${e.localizedMessage}"
+                } finally {
+                    progressMessage = null
+                }
             }
         }
     }
@@ -221,7 +260,7 @@ fun ShopProfileScreen(
                         value = upiId,
                         onValueChange = { upiId = it },
                         label = { Text(LanguageStrings.get("upi_optional_label")) },
-                        placeholder = { Text("shop@upi") },
+                        placeholder = { Text("e.g. shop@upi") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -234,7 +273,7 @@ fun ShopProfileScreen(
                         value = gstin,
                         onValueChange = { gstin = it },
                         label = { Text(LanguageStrings.get("gstin_optional_label")) },
-                        placeholder = { Text("24AAAAA0000A1Z5") },
+                        placeholder = { Text("e.g. 24AAAAA0000A1Z5") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -378,9 +417,18 @@ fun ShopProfileScreen(
 
                 OutlinedButton(
                     onClick = {
-                        val file = repository.exportKhataLedgerCsv(context)
-                        repository.shareCsvFile(context, file, "Share Khata Ledger CSV")
-                        statusMessage = "✅ Khata Ledger CSV exported: ${file.name}"
+                        coroutineScope.launch {
+                            progressMessage = LanguageStrings.get("progress_exporting", currentLang)
+                            try {
+                                val file = withContext(Dispatchers.IO) { repository.exportKhataLedgerCsv(context) }
+                                repository.shareCsvFile(context, file, "Share Khata Ledger CSV")
+                                statusMessage = "✅ Khata Ledger CSV exported: ${file.name}"
+                            } catch (e: Exception) {
+                                statusMessage = "❌ Export failed: ${e.message}"
+                            } finally {
+                                progressMessage = null
+                            }
+                        }
                     },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().height(44.dp)
@@ -394,9 +442,18 @@ fun ShopProfileScreen(
 
                 OutlinedButton(
                     onClick = {
-                        val file = repository.exportSalesReportCsv(context)
-                        repository.shareCsvFile(context, file, "Share Sales Report CSV")
-                        statusMessage = "✅ Sales Report CSV exported: ${file.name}"
+                        coroutineScope.launch {
+                            progressMessage = LanguageStrings.get("progress_exporting", currentLang)
+                            try {
+                                val file = withContext(Dispatchers.IO) { repository.exportSalesReportCsv(context) }
+                                repository.shareCsvFile(context, file, "Share Sales Report CSV")
+                                statusMessage = "✅ Sales Report CSV exported: ${file.name}"
+                            } catch (e: Exception) {
+                                statusMessage = "❌ Export failed: ${e.message}"
+                            } finally {
+                                progressMessage = null
+                            }
+                        }
                     },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().height(44.dp)
@@ -410,9 +467,18 @@ fun ShopProfileScreen(
 
                 OutlinedButton(
                     onClick = {
-                        val file = repository.exportInventoryCsv(context)
-                        repository.shareCsvFile(context, file, "Share Inventory Stock CSV")
-                        statusMessage = "✅ Inventory Stock CSV exported: ${file.name}"
+                        coroutineScope.launch {
+                            progressMessage = LanguageStrings.get("progress_exporting", currentLang)
+                            try {
+                                val file = withContext(Dispatchers.IO) { repository.exportInventoryCsv(context) }
+                                repository.shareCsvFile(context, file, "Share Inventory Stock CSV")
+                                statusMessage = "✅ Inventory Stock CSV exported: ${file.name}"
+                            } catch (e: Exception) {
+                                statusMessage = "❌ Export failed: ${e.message}"
+                            } finally {
+                                progressMessage = null
+                            }
+                        }
                     },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().height(44.dp)
@@ -470,9 +536,18 @@ fun ShopProfileScreen(
 
                     OutlinedButton(
                         onClick = {
-                            val backupFile = repository.exportBackupFile(context)
-                            repository.shareBackupFile(context, backupFile)
-                            statusMessage = "Backup shared: ${backupFile.name}"
+                            coroutineScope.launch {
+                                progressMessage = LanguageStrings.get("progress_exporting", currentLang)
+                                try {
+                                    val backupFile = withContext(Dispatchers.IO) { repository.exportBackupFile(context) }
+                                    repository.shareBackupFile(context, backupFile)
+                                    statusMessage = "Backup shared: ${backupFile.name}"
+                                } catch (e: Exception) {
+                                    statusMessage = "❌ Backup share failed: ${e.message}"
+                                } finally {
+                                    progressMessage = null
+                                }
+                            }
                         },
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.weight(1f)
@@ -628,9 +703,20 @@ fun ShopProfileScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val imported = repository.importCustomersFromCsv(csvPreviews)
-                        statusMessage = "✅ Successfully imported $imported customers from CSV!"
-                        showCsvPreviewDialog = false
+                        coroutineScope.launch {
+                            progressMessage = LanguageStrings.get("progress_importing_csv", currentLang)
+                            try {
+                                val imported = withContext(Dispatchers.IO) {
+                                    repository.importCustomersFromCsv(csvPreviews)
+                                }
+                                statusMessage = "✅ Successfully imported $imported customers from CSV!"
+                                showCsvPreviewDialog = false
+                            } catch (e: Exception) {
+                                statusMessage = "❌ Import failed: ${e.message}"
+                            } finally {
+                                progressMessage = null
+                            }
+                        }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = JamaGreen)
                 ) {
@@ -671,12 +757,24 @@ fun ShopProfileScreen(
                 if (validation.isValid) {
                     Button(
                         onClick = {
-                            val result = repository.importDataFromJsonString(pendingImportJson)
-                            if (result.success) {
-                                statusMessage = "✅ ${result.message}"
-                                showImportSummaryDialog = false
-                            } else {
-                                statusMessage = "❌ ${result.message}"
+                            coroutineScope.launch {
+                                progressMessage = LanguageStrings.get("progress_restoring", currentLang)
+                                try {
+                                    val result = withContext(Dispatchers.IO) {
+                                        repository.importDataFromJsonString(pendingImportJson)
+                                    }
+                                    if (result.success) {
+                                        val extra = if (result.repairedCount > 0) " (${result.repairedCount} recovered entries attached to 'Recovered entries')" else ""
+                                        statusMessage = "✅ ${result.message}$extra"
+                                        showImportSummaryDialog = false
+                                    } else {
+                                        statusMessage = "❌ ${result.message}"
+                                    }
+                                } catch (e: Exception) {
+                                    statusMessage = "❌ Restore failed: ${e.message}"
+                                } finally {
+                                    progressMessage = null
+                                }
                             }
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
@@ -739,5 +837,9 @@ fun ShopProfileScreen(
                 }
             }
         )
+    }
+
+    if (progressMessage != null) {
+        OperationProgressDialog(message = progressMessage!!)
     }
 }

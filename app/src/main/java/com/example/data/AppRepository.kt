@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,13 +21,26 @@ import java.util.*
 
 class AppRepository(
     val context: Context,
-    val database: AppDatabase = AppDatabase.getInstance(context)
+    val database: AppDatabase = AppDatabase.getInstance(context),
+    val asyncInit: Boolean = true
 ) {
     private val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    private val _corruptDataBanner = MutableStateFlow<String?>(null)
-    val corruptDataBanner: StateFlow<String?> = _corruptDataBanner.asStateFlow()
+    private val _isInitialLoading = MutableStateFlow(true)
+    val isInitialLoading: StateFlow<Boolean> = _isInitialLoading.asStateFlow()
+
+    private val _migrationError = MutableStateFlow<String?>(null)
+    val migrationError: StateFlow<String?> = _migrationError.asStateFlow()
+
+    private val _isMigrationBlocked = MutableStateFlow(false)
+    val isMigrationBlocked: StateFlow<Boolean> = _isMigrationBlocked.asStateFlow()
+
+    private val _migrationNotice = MutableStateFlow<String?>(null)
+    val migrationNotice: StateFlow<String?> = _migrationNotice.asStateFlow()
+
+    // Backwards compatibility alias for corruptDataBanner
+    val corruptDataBanner: StateFlow<String?> = _migrationError.asStateFlow()
 
     private val _customers = MutableStateFlow<List<Customer>>(emptyList())
     val customers: StateFlow<List<Customer>> = _customers.asStateFlow()
@@ -56,12 +70,51 @@ class AppRepository(
     val hasCompletedOnboarding: StateFlow<Boolean> = _hasCompletedOnboarding.asStateFlow()
 
     init {
-        performOneTimeMigrationIfNeeded()
-        refreshAllInMemoryCaches()
-        startRoomFlowCollectors()
+        val persistentError = prefs.getString("legacy_migration_error", null)
+        if (!persistentError.isNullOrBlank()) {
+            _migrationError.value = persistentError
+            _isMigrationBlocked.value = true
+        }
+
+        if (asyncInit) {
+            repositoryScope.launch(Dispatchers.IO) {
+                try {
+                    if (!_isMigrationBlocked.value) {
+                        performOneTimeMigrationIfNeededInternal()
+                    }
+                    refreshAllInMemoryCachesInternal()
+                } catch (e: Exception) {
+                    Log.e("AppRepository", "Async startup initialization error: ${e.message}", e)
+                    _migrationError.value = e.localizedMessage ?: "Startup error"
+                    _isMigrationBlocked.value = true
+                } finally {
+                    _isInitialLoading.value = false
+                }
+                startRoomFlowCollectors()
+            }
+        } else {
+            runBlocking(Dispatchers.IO) {
+                if (!_isMigrationBlocked.value) {
+                    performOneTimeMigrationIfNeededInternal()
+                }
+                refreshAllInMemoryCachesInternal()
+                _isInitialLoading.value = false
+                startRoomFlowCollectors()
+            }
+        }
     }
 
-    private fun refreshAllInMemoryCaches() = runBlocking(Dispatchers.IO) {
+    suspend fun awaitInitialization() {
+        isInitialLoading.first { !it }
+    }
+
+    private fun checkWritesAllowed() {
+        if (_isMigrationBlocked.value) {
+            throw IllegalStateException("Database operations are blocked due to an unhandled migration error: ${_migrationError.value}. Please resolve the error first.")
+        }
+    }
+
+    private suspend fun refreshAllInMemoryCachesInternal() {
         _customers.value = database.customerDao().getAllList().map { it.toDomain() }
         _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
         _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
@@ -77,6 +130,10 @@ class AppRepository(
         }
         _selectedInvoiceTheme.value = settings?.theme ?: "PREMIUM_BLUE"
         _hasCompletedOnboarding.value = settings?.hasCompletedOnboarding ?: false
+    }
+
+    fun refreshAllInMemoryCaches() = runBlocking(Dispatchers.IO) {
+        refreshAllInMemoryCachesInternal()
     }
 
     private fun startRoomFlowCollectors() {
@@ -130,23 +187,23 @@ class AppRepository(
     // ONE-TIME MIGRATION (SharedPreferences -> Room)
     // ==========================================
 
-    private fun performOneTimeMigrationIfNeeded() = runBlocking(Dispatchers.IO) {
+    private suspend fun performOneTimeMigrationIfNeededInternal() {
         if (!prefs.contains("app_saved_data")) {
             ensureDefaultProfileAndSettings()
-            return@runBlocking
+            return
         }
 
         val savedJson = prefs.getString("app_saved_data", null)
         if (savedJson.isNullOrBlank()) {
             prefs.edit().putString("app_saved_data_migrated", "").remove("app_saved_data").commit()
             ensureDefaultProfileAndSettings()
-            return@runBlocking
+            return
         }
 
         try {
             val json = JSONObject(savedJson)
             val tempCustomers = mutableListOf<CustomerEntity>()
-            val tempTransactions = mutableListOf<TransactionEntity>()
+            val rawTransactions = mutableListOf<TransactionEntity>()
             val tempInventory = mutableListOf<InventoryItemEntity>()
             val tempInvoices = mutableListOf<InvoiceEntity>()
             val tempInvoiceItems = mutableListOf<InvoiceItemEntity>()
@@ -158,10 +215,10 @@ class AppRepository(
                     val o = arr.getJSONObject(i)
                     tempCustomers.add(CustomerEntity(
                         id = o.optString("id", UUID.randomUUID().toString()),
-                        name = o.optString("name", ""),
-                        phone = o.optString("phone", ""),
-                        address = o.optString("address", ""),
-                        gstin = o.optString("gstin", ""),
+                        name = o.optString("name", "").trim().ifBlank { "Customer" },
+                        phone = o.optString("phone", "").trim(),
+                        address = o.optString("address", "").trim(),
+                        gstin = o.optString("gstin", "").trim(),
                         createdAt = o.optLong("createdAt", System.currentTimeMillis())
                     ))
                 }
@@ -171,9 +228,9 @@ class AppRepository(
                 val arr = json.getJSONArray("transactions")
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
-                    tempTransactions.add(TransactionEntity(
+                    rawTransactions.add(TransactionEntity(
                         id = o.optString("id", UUID.randomUUID().toString()),
-                        customerId = o.optString("customerId", ""),
+                        customerId = o.optString("customerId", "").trim(),
                         amount = o.optDouble("amount", 0.0),
                         type = o.optString("type", "GAVE"),
                         note = o.optString("note", ""),
@@ -181,6 +238,30 @@ class AppRepository(
                         isCancelled = o.optBoolean("isCancelled", false),
                         billNumber = o.optString("billNumber", "")
                     ))
+                }
+            }
+
+            // Tolerant migration: attach transactions whose customerId is missing or unknown to "Recovered entries"
+            val validCustIds = tempCustomers.map { it.id }.toSet()
+            val repairedTransactions = mutableListOf<TransactionEntity>()
+            var orphanCount = 0
+            var recoveredCustomer: CustomerEntity? = tempCustomers.find { it.name.equals("Recovered entries", ignoreCase = true) }
+
+            for (tx in rawTransactions) {
+                if (tx.customerId.isBlank() || !validCustIds.contains(tx.customerId)) {
+                    orphanCount++
+                    if (recoveredCustomer == null) {
+                        recoveredCustomer = CustomerEntity(
+                            id = UUID.randomUUID().toString(),
+                            name = "Recovered entries",
+                            phone = "",
+                            address = "Auto-created for unassigned legacy transactions"
+                        )
+                        tempCustomers.add(recoveredCustomer)
+                    }
+                    repairedTransactions.add(tx.copy(customerId = recoveredCustomer.id))
+                } else {
+                    repairedTransactions.add(tx)
                 }
             }
 
@@ -197,12 +278,12 @@ class AppRepository(
                     }
                     tempInventory.add(InventoryItemEntity(
                         id = o.optString("id", UUID.randomUUID().toString()),
-                        name = o.optString("name", ""),
-                        itemCode = o.optString("itemCode", ""),
+                        name = o.optString("name", "").trim().ifBlank { "Item" },
+                        itemCode = o.optString("itemCode", "").trim(),
                         salePrice = o.optDouble("salePrice", 0.0),
                         purchasePrice = o.optDouble("purchasePrice", 0.0),
                         stock = o.optInt("stock", 0),
-                        category = o.optString("category", "General"),
+                        category = o.optString("category", "General").trim().ifBlank { "General" },
                         sizes = sizes,
                         gstPercent = o.optDouble("gstPercent", 0.0)
                     ))
@@ -214,9 +295,11 @@ class AppRepository(
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
                     val invId = o.optString("id", UUID.randomUUID().toString())
+                    val themeName = prefs.getString("invoice_theme", null)
+                        ?: o.optString("themeName", "PREMIUM_BLUE")
                     tempInvoices.add(InvoiceEntity(
                         id = invId,
-                        billNumber = o.optString("billNumber", ""),
+                        billNumber = o.optString("billNumber", "INV-${System.currentTimeMillis() % 100000}"),
                         date = o.optLong("date", System.currentTimeMillis()),
                         customerName = o.optString("customerName", ""),
                         customerPhone = o.optString("customerPhone", ""),
@@ -229,7 +312,7 @@ class AppRepository(
                         stateOfSupply = o.optString("stateOfSupply", "Gujarat"),
                         gstin = o.optString("gstin", ""),
                         notes = o.optString("notes", ""),
-                        themeName = o.optString("themeName", "PREMIUM_BLUE")
+                        themeName = themeName
                     ))
 
                     val itemsArr = o.optJSONArray("items")
@@ -239,7 +322,7 @@ class AppRepository(
                             tempInvoiceItems.add(InvoiceItemEntity(
                                 id = io.optString("id", UUID.randomUUID().toString()),
                                 invoiceId = invId,
-                                name = io.optString("name", ""),
+                                name = io.optString("name", "Item"),
                                 quantity = io.optInt("quantity", 1),
                                 unitPrice = io.optDouble("unitPrice", 0.0),
                                 gstPercent = io.optDouble("gstPercent", 0.0),
@@ -279,17 +362,21 @@ class AppRepository(
                 state = prefs.getString("store_state", "Gujarat") ?: "Gujarat"
             )
 
+            val invoiceThemePref = prefs.getString("invoice_theme", null)
+                ?: prefs.getString("selected_invoice_theme", "PREMIUM_BLUE")
+                ?: "PREMIUM_BLUE"
+
             val appSettings = AppSettingsEntity(
                 id = 1,
                 language = prefs.getString("selected_language", "hinglish") ?: "hinglish",
-                theme = prefs.getString("selected_invoice_theme", "PREMIUM_BLUE") ?: "PREMIUM_BLUE",
+                theme = invoiceThemePref,
                 hasCompletedOnboarding = prefs.getBoolean("has_completed_onboarding", false)
             )
 
             // Insert everything inside ONE atomic transaction
             database.withTransaction {
                 database.customerDao().insertAll(tempCustomers)
-                database.transactionDao().insertAll(tempTransactions)
+                database.transactionDao().insertAll(repairedTransactions)
                 database.inventoryDao().insertAll(tempInventory)
                 database.invoiceDao().insertInvoices(tempInvoices)
                 database.invoiceDao().insertItems(tempInvoiceItems)
@@ -302,15 +389,69 @@ class AppRepository(
             prefs.edit()
                 .putString("app_saved_data_migrated", savedJson)
                 .remove("app_saved_data")
+                .remove("legacy_migration_error")
                 .commit()
+
+            _migrationError.value = null
+            _isMigrationBlocked.value = false
+
+            if (orphanCount > 0) {
+                _migrationNotice.value = "Migration recovered $orphanCount unlinked transaction(s) and attached them to 'Recovered entries'."
+            }
 
             Log.i("AppRepository", "Migration to Room succeeded.")
         } catch (e: Exception) {
             Log.e("AppRepository", "Error during one-time migration: ${e.message}", e)
             val timestamp = System.currentTimeMillis()
-            prefs.edit().putString("app_saved_data_corrupt_$timestamp", savedJson).commit()
-            _corruptDataBanner.value = "Data migration error detected. Corrupt data backed up safely."
+            prefs.edit()
+                .putString("legacy_migration_error", e.localizedMessage ?: "Migration error")
+                .putString("app_saved_data_corrupt_$timestamp", savedJson)
+                .commit()
+            // CRITICAL: keep app_saved_data UNTOUCHED
+            _migrationError.value = e.localizedMessage ?: "Data migration error detected"
+            _isMigrationBlocked.value = true
         }
+    }
+
+    fun performOneTimeMigrationIfNeeded() = runBlocking(Dispatchers.IO) {
+        performOneTimeMigrationIfNeededInternal()
+    }
+
+    fun retryMigration() {
+        repositoryScope.launch(Dispatchers.IO) {
+            _migrationError.value = null
+            _isMigrationBlocked.value = false
+            prefs.edit().remove("legacy_migration_error").commit()
+            performOneTimeMigrationIfNeededInternal()
+            refreshAllInMemoryCachesInternal()
+        }
+    }
+
+    fun getDamagedLegacyJson(): String {
+        val currentSaved = prefs.getString("app_saved_data", null)
+        if (!currentSaved.isNullOrBlank()) return currentSaved
+        val corruptKey = prefs.all.keys.filter { it.startsWith("app_saved_data_corrupt_") }.maxOrNull()
+        if (corruptKey != null) {
+            return prefs.getString(corruptKey, "") ?: ""
+        }
+        return ""
+    }
+
+    fun startFreshFromDamagedData() {
+        val raw = getDamagedLegacyJson()
+        val timestamp = System.currentTimeMillis()
+        prefs.edit()
+            .putString("app_saved_data_discarded_$timestamp", raw)
+            .remove("app_saved_data")
+            .remove("legacy_migration_error")
+            .commit()
+        _migrationError.value = null
+        _isMigrationBlocked.value = false
+        clearAllData()
+    }
+
+    fun dismissMigrationNotice() {
+        _migrationNotice.value = null
     }
 
     private suspend fun ensureDefaultProfileAndSettings() {
@@ -332,11 +473,15 @@ class AppRepository(
 
         val existingSettings = database.appSettingsDao().getSettingsDirect()
         if (existingSettings == null) {
+            val invoiceThemePref = prefs.getString("invoice_theme", null)
+                ?: prefs.getString("selected_invoice_theme", "PREMIUM_BLUE")
+                ?: "PREMIUM_BLUE"
+
             database.appSettingsDao().insertOrUpdate(
                 AppSettingsEntity(
                     id = 1,
                     language = prefs.getString("selected_language", "hinglish") ?: "hinglish",
-                    theme = prefs.getString("selected_invoice_theme", "PREMIUM_BLUE") ?: "PREMIUM_BLUE",
+                    theme = invoiceThemePref,
                     hasCompletedOnboarding = prefs.getBoolean("has_completed_onboarding", false)
                 )
             )
@@ -344,12 +489,11 @@ class AppRepository(
     }
 
     fun dismissCorruptDataBanner() {
-        _corruptDataBanner.value = null
+        _migrationNotice.value = null
     }
 
     fun startFreshAfterCorruption() {
-        clearAllData()
-        _corruptDataBanner.value = null
+        startFreshFromDamagedData()
     }
 
     // ==========================================
@@ -365,6 +509,7 @@ class AppRepository(
         ownerName: String,
         state: String = "Gujarat"
     ) {
+        checkWritesAllowed()
         val profile = StoreProfileEntity(
             id = 1,
             storeName = storeName,
@@ -382,6 +527,7 @@ class AppRepository(
     }
 
     fun setLanguage(newLanguage: AppLanguage) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             val current = database.appSettingsDao().getSettingsDirect() ?: AppSettingsEntity(id = 1)
             database.appSettingsDao().insertOrUpdate(current.copy(language = newLanguage.code))
@@ -390,6 +536,7 @@ class AppRepository(
     }
 
     fun setInvoiceTheme(theme: String) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             val current = database.appSettingsDao().getSettingsDirect() ?: AppSettingsEntity(id = 1)
             database.appSettingsDao().insertOrUpdate(current.copy(theme = theme))
@@ -398,6 +545,7 @@ class AppRepository(
     }
 
     fun completeOnboarding() {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             val current = database.appSettingsDao().getSettingsDirect() ?: AppSettingsEntity(id = 1)
             database.appSettingsDao().insertOrUpdate(current.copy(hasCompletedOnboarding = true))
@@ -410,6 +558,7 @@ class AppRepository(
     // ==========================================
 
     fun addCustomer(name: String, phone: String, address: String = "", gstin: String = ""): Customer {
+        checkWritesAllowed()
         val newCustomer = CustomerEntity(
             name = name.trim(),
             phone = phone.trim(),
@@ -424,6 +573,7 @@ class AppRepository(
     }
 
     fun updateCustomer(id: String, name: String, phone: String, address: String = "", gstin: String = "") {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             val current = database.customerDao().getById(id)
             if (current != null) {
@@ -441,6 +591,7 @@ class AppRepository(
     }
 
     fun deleteCustomer(customerId: String) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.withTransaction {
                 val txs = database.transactionDao().getByCustomerId(customerId)
@@ -483,6 +634,7 @@ class AppRepository(
         note: String = "",
         billNumber: String = ""
     ): Transaction {
+        checkWritesAllowed()
         val newTx = TransactionEntity(
             customerId = customerId,
             amount = amount,
@@ -498,6 +650,7 @@ class AppRepository(
     }
 
     fun toggleTransactionCancel(transactionId: String) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             val current = database.transactionDao().getById(transactionId)
             if (current != null) {
@@ -508,6 +661,7 @@ class AppRepository(
     }
 
     fun deleteTransaction(transactionId: String) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.withTransaction {
                 database.cashbookDao().deleteByLinkedId(transactionId)
@@ -525,6 +679,7 @@ class AppRepository(
         paymentMode: String = "CASH",
         addToCashbook: Boolean = true
     ): Boolean {
+        checkWritesAllowed()
         return runBlocking(Dispatchers.IO) {
             val success = database.withTransaction {
                 val tx = database.transactionDao().getById(transactionId) ?: return@withTransaction false
@@ -605,6 +760,7 @@ class AppRepository(
         sizes: List<String> = emptyList(),
         gstPercent: Double = 0.0
     ): InventoryItem {
+        checkWritesAllowed()
         val newItem = InventoryItemEntity(
             name = name.trim(),
             itemCode = itemCode.trim(),
@@ -623,6 +779,7 @@ class AppRepository(
     }
 
     fun updateInventoryStock(itemId: String, stockDelta: Int) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             val current = database.inventoryDao().getById(itemId)
             if (current != null) {
@@ -634,6 +791,7 @@ class AppRepository(
     }
 
     fun deleteInventoryItem(itemId: String) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.inventoryDao().deleteById(itemId)
             _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
@@ -645,6 +803,7 @@ class AppRepository(
     // ==========================================
 
     fun createInvoice(invoice: Invoice): Invoice {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.withTransaction {
                 // 1. Insert invoice header and line items
@@ -704,6 +863,7 @@ class AppRepository(
     }
 
     fun deleteInvoice(invoiceId: String) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.withTransaction {
                 val invWithItems = database.invoiceDao().getWithItemsById(invoiceId) ?: return@withTransaction
@@ -756,6 +916,7 @@ class AppRepository(
         linkedId: String? = null,
         source: String = "manual"
     ): CashEntry {
+        checkWritesAllowed()
         val entry = CashEntryEntity(
             type = type,
             amount = amount,
@@ -773,6 +934,7 @@ class AppRepository(
     }
 
     fun deleteCashEntry(id: String) {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.cashbookDao().deleteById(id)
             _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
@@ -824,6 +986,7 @@ class AppRepository(
     }
 
     fun importCustomersFromCsv(previews: List<CsvCustomerPreview>): Int {
+        checkWritesAllowed()
         val nonDuplicates = previews.filter { !it.isDuplicate }
         return runBlocking(Dispatchers.IO) {
             val count = database.withTransaction {
@@ -861,6 +1024,7 @@ class AppRepository(
     }
 
     fun clearAllData() {
+        checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.withTransaction {
                 database.customerDao().deleteAll()
@@ -1066,6 +1230,7 @@ class AppRepository(
     }
 
     fun importDataFromJsonString(jsonStr: String): ImportResult {
+        checkWritesAllowed()
         val validation = validateBackupJson(jsonStr)
         if (!validation.success) {
             return validation
@@ -1077,7 +1242,7 @@ class AppRepository(
 
             val json = JSONObject(jsonStr)
             val newCustomers = mutableListOf<CustomerEntity>()
-            val newTransactions = mutableListOf<TransactionEntity>()
+            val rawTransactions = mutableListOf<TransactionEntity>()
             val newInventory = mutableListOf<InventoryItemEntity>()
             val newInvoices = mutableListOf<InvoiceEntity>()
             val newInvoiceItems = mutableListOf<InvoiceItemEntity>()
@@ -1102,7 +1267,7 @@ class AppRepository(
                 val arr = json.getJSONArray("transactions")
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
-                    newTransactions.add(TransactionEntity(
+                    rawTransactions.add(TransactionEntity(
                         id = o.optString("id", UUID.randomUUID().toString()),
                         customerId = o.optString("customerId", ""),
                         amount = o.optDouble("amount", 0.0),
@@ -1112,6 +1277,33 @@ class AppRepository(
                         isCancelled = o.optBoolean("isCancelled", false),
                         billNumber = o.optString("billNumber", "")
                     ))
+                }
+            }
+
+            // Repair orphan transactions whose customerId is missing or unknown
+            val validCustIds = newCustomers.map { it.id }.toSet()
+            val repairedTransactions = mutableListOf<TransactionEntity>()
+            var orphanCount = 0
+            var recoveredCustomer: CustomerEntity? = null
+
+            for (tx in rawTransactions) {
+                if (tx.customerId.isBlank() || !validCustIds.contains(tx.customerId)) {
+                    orphanCount++
+                    if (recoveredCustomer == null) {
+                        recoveredCustomer = newCustomers.find { it.name.equals("Recovered entries", ignoreCase = true) }
+                        if (recoveredCustomer == null) {
+                            recoveredCustomer = CustomerEntity(
+                                id = UUID.randomUUID().toString(),
+                                name = "Recovered entries",
+                                phone = "",
+                                address = "Auto-created for unassigned backup transactions"
+                            )
+                            newCustomers.add(recoveredCustomer)
+                        }
+                    }
+                    repairedTransactions.add(tx.copy(customerId = recoveredCustomer.id))
+                } else {
+                    repairedTransactions.add(tx)
                 }
             }
 
@@ -1208,7 +1400,7 @@ class AppRepository(
                     database.cashbookDao().deleteAll()
 
                     database.customerDao().insertAll(newCustomers)
-                    database.transactionDao().insertAll(newTransactions)
+                    database.transactionDao().insertAll(repairedTransactions)
                     database.inventoryDao().insertAll(newInventory)
                     database.invoiceDao().insertInvoices(newInvoices)
                     database.invoiceDao().insertItems(newInvoiceItems)
@@ -1220,7 +1412,11 @@ class AppRepository(
                 _invoices.value = database.invoiceDao().getAllWithItemsList().map { it.toDomain() }
                 _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
             }
-            validation
+            validation.copy(
+                customerCount = newCustomers.size,
+                transactionCount = repairedTransactions.size,
+                repairedCount = orphanCount
+            )
         } catch (e: Exception) {
             Log.e("AppRepository", "Error applying backup to Room: ${e.message}", e)
             ImportResult(success = false, errorMessage = "Error applying backup: ${e.localizedMessage}")

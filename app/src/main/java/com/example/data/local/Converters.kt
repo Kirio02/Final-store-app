@@ -23,7 +23,8 @@ class Converters {
                 result.add(arr.getString(i))
             }
             result
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("Converters", "Failed to deserialize string list: $data", e)
             emptyList()
         }
     }

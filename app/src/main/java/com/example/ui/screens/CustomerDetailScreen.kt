@@ -45,6 +45,10 @@ fun CustomerDetailScreen(
     val customerTx = transactions.filter { it.customerId == customer.id }
     val balance = repository.getCustomerBalance(customer.id)
 
+    val customers by repository.customers.collectAsState()
+    val currentCustomer = customers.find { it.id == customer.id } ?: customer
+    val hasPhone = currentCustomer.phone.isNotBlank()
+
     var showAddTxDialog by remember { mutableStateOf(false) }
     var txTypeToAdd by remember { mutableStateOf("GAVE") } // GAVE or GOT
 
@@ -52,13 +56,21 @@ fun CustomerDetailScreen(
     var txToSettle by remember { mutableStateOf<Transaction?>(null) }
     var settleAmountText by remember { mutableStateOf("") }
 
+    var showEditPhoneDialog by remember { mutableStateOf(false) }
+    var phoneInputText by remember { mutableStateOf(currentCustomer.phone) }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(customer.name, fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 18.sp)
-                        Text(customer.phone, style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    Column(modifier = Modifier.clickable { if (!hasPhone) { phoneInputText = ""; showEditPhoneDialog = true } }) {
+                        Text(currentCustomer.name, fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 18.sp)
+                        Text(
+                            text = if (hasPhone) currentCustomer.phone else LanguageStrings.get("add_phone_number_hint", currentLang),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (hasPhone) TextSecondary else UdharRed,
+                            fontWeight = if (hasPhone) FontWeight.Normal else FontWeight.SemiBold
+                        )
                     }
                 },
                 navigationIcon = {
@@ -67,23 +79,41 @@ fun CustomerDetailScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
-                        val uri = Uri.parse("tel:${customer.phone}")
-                        context.startActivity(Intent(Intent.ACTION_DIAL, uri))
-                    }) {
-                        Icon(Icons.Default.Call, contentDescription = "Call", tint = PrimaryBlue)
+                    IconButton(
+                        onClick = {
+                            if (hasPhone) {
+                                val uri = Uri.parse("tel:${currentCustomer.phone}")
+                                context.startActivity(Intent(Intent.ACTION_DIAL, uri))
+                            }
+                        },
+                        enabled = hasPhone
+                    ) {
+                        Icon(
+                            Icons.Default.Call,
+                            contentDescription = "Call",
+                            tint = if (hasPhone) PrimaryBlue else TextTertiary
+                        )
                     }
-                    IconButton(onClick = {
-                        val shopName = storeProfile.storeName.ifBlank { "Ghanshyam Kids Wear" }
-                        val upiText = if (storeProfile.upiId.isNotBlank()) " Kripya UPI id: ${storeProfile.upiId} par bhugtan karein." else ""
-                        val shareText = "Namaste ${customer.name}, $shopName ki taraf se aapka pending hisaab: ₹${"%.2f".format(balance)}.$upiText"
-                        val intent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, shareText)
-                        }
-                        context.startActivity(Intent.createChooser(intent, "Share WhatsApp Reminder"))
-                    }) {
-                        Icon(Icons.Default.Share, contentDescription = "Share", tint = JamaGreen)
+                    IconButton(
+                        onClick = {
+                            if (hasPhone) {
+                                val shopName = storeProfile.storeName.ifBlank { "Ghanshyam Kids Wear" }
+                                val upiText = if (storeProfile.upiId.isNotBlank()) " Kripya UPI id: ${storeProfile.upiId} par bhugtan karein." else ""
+                                val shareText = "Namaste ${currentCustomer.name}, $shopName ki taraf se aapka pending hisaab: ₹${"%.2f".format(balance)}.$upiText"
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, shareText)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share WhatsApp Reminder"))
+                            }
+                        },
+                        enabled = hasPhone
+                    ) {
+                        Icon(
+                            Icons.Default.Share,
+                            contentDescription = "Share",
+                            tint = if (hasPhone) JamaGreen else TextTertiary
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = SurfaceWhite)
@@ -140,6 +170,43 @@ fun CustomerDetailScreen(
                 .padding(padding)
                 .background(SoftBackground)
         ) {
+            if (!hasPhone) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .clickable { phoneInputText = ""; showEditPhoneDialog = true },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = ChipInactiveBg),
+                    border = CardDefaults.outlinedCardBorder()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.PhoneIphone, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = LanguageStrings.get("add_phone_number_hint", currentLang),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                        }
+                        Text(
+                            text = "Add +",
+                            fontWeight = FontWeight.Bold,
+                            color = PrimaryBlue,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+
             // Net Balance Card (Khatabook color convention: Receivable/Lena Hai is JamaGreen, Payable/Dena Hai is UdharRed)
             Card(
                 modifier = Modifier
@@ -575,6 +642,53 @@ fun CustomerDetailScreen(
             },
             dismissButton = {
                 TextButton(onClick = { txToSettle = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showEditPhoneDialog) {
+        AlertDialog(
+            onDismissRequest = { showEditPhoneDialog = false },
+            title = { Text("Update Phone Number", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Add a phone number to enable Call and WhatsApp reminders for ${currentCustomer.name}:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                    OutlinedTextField(
+                        value = phoneInputText,
+                        onValueChange = { phoneInputText = it },
+                        label = { Text("Phone Number") },
+                        placeholder = { Text("e.g. +91 98765 43210") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleaned = phoneInputText.trim()
+                        repository.updateCustomer(
+                            id = currentCustomer.id,
+                            name = currentCustomer.name,
+                            phone = cleaned,
+                            address = currentCustomer.address,
+                            gstin = currentCustomer.gstin
+                        )
+                        showEditPhoneDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
+                ) {
+                    Text("Save", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditPhoneDialog = false }) {
                     Text("Cancel")
                 }
             }

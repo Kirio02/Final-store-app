@@ -91,10 +91,17 @@ data class ImportResult(
     val inventoryCount: Int = 0,
     val invoiceCount: Int = 0,
     val cashbookCount: Int = 0,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val repairedCount: Int = 0
 ) {
     val isValid: Boolean get() = success
-    val message: String get() = errorMessage ?: "Import successful ($customerCount customers, $transactionCount txs, $inventoryCount items, $invoiceCount bills, $cashbookCount cash entries)"
+    val message: String get() = errorMessage ?: (
+        if (repairedCount > 0) {
+            "Import successful ($customerCount customers, $transactionCount txs, $inventoryCount items, $invoiceCount bills, $cashbookCount cash entries). Note: $repairedCount unlinked transaction(s) attached to 'Recovered entries'."
+        } else {
+            "Import successful ($customerCount customers, $transactionCount txs, $inventoryCount items, $invoiceCount bills, $cashbookCount cash entries)"
+        }
+    )
 }
 
 data class CsvCustomerPreview(

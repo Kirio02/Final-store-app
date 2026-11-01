@@ -169,7 +169,7 @@ fun OnboardingScreen(
                         value = phone,
                         onValueChange = { phone = it; showValidationError = false },
                         label = { Text(LanguageStrings.get("store_phone", currentLang)) },
-                        placeholder = { Text("e.g. +91 98200 00000") },
+                        placeholder = { Text("e.g. +91 98765 43210") },
                         singleLine = true,
                         isError = showValidationError && phone.isBlank(),
                         modifier = Modifier.fillMaxWidth()
@@ -220,7 +220,7 @@ fun OnboardingScreen(
                         value = gstin,
                         onValueChange = { gstin = it },
                         label = { Text(LanguageStrings.get("gstin_optional_label", currentLang)) },
-                        placeholder = { Text("24AAAAA0000A1Z5") },
+                        placeholder = { Text("e.g. 24AAAAA0000A1Z5") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -229,7 +229,7 @@ fun OnboardingScreen(
                         value = upiId,
                         onValueChange = { upiId = it },
                         label = { Text(LanguageStrings.get("upi_optional_label", currentLang)) },
-                        placeholder = { Text("shop@upi") },
+                        placeholder = { Text("e.g. shop@upi") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
